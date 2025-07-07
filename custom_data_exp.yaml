@@ -1,1 +1,12 @@
+path: ./Okutama_Dataset # dataset root dir
+# path: ./Okutama_23_March_Experimental # dataset root dir
+train: train_experimental/images
+val: val_experimental/images
+# test: test/images
 
+names:
+  0: walk
+  1: stand
+  2: sit
+  3: run
+  4: lying
