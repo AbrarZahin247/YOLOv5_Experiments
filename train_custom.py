@@ -134,3 +134,26 @@ def main(opt):
     final_weights = train(final_train_opt)
     print(f"Final training complete. Final model weights saved at {final_weights}")
     print("\nProcess complete.")
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    # --- IMPORTANT: You must create a data.yaml file for your signature dataset ---
+    # Example `signature_data.yaml`:
+    # train: ../SignatureData/train/images
+    # val: ../SignatureData/valid/images
+    #
+    # nc: 2  # number of classes
+    # names: ['genuine', 'forged']  # class names
+    parser.add_argument('--data', type=str, default='data/signature_data.yaml', help='path to your data.yaml file')
+    parser.add_argument('--initial-weights', type=str, default='yolov5s.pt', help='initial weights path')
+    parser.add_argument('--cfg', type=str, default='', help='model.yaml path')
+    parser.add_argument('--img-size', type=int, default=640, help='image size')
+    parser.add_argument('--batch-size', type=int, default=16, help='batch size')
+    parser.add_argument('--project', default='weights', help='save directory for pruned/averaged weights')
+    parser.add_argument('--cache', action='store_true', help='cache images for faster training')
+
+    opt = parser.parse_args()
+
+    # This script assumes you are running it from the root of a yolov5 repository.
+    # Ensure all dependencies for train.py are installed.
+    main(opt)
