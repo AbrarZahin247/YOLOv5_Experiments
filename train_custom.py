@@ -244,13 +244,17 @@ def main(opt):
             linear_lr=False,
             label_smoothing=0.0,
             patience=100,
-            freeze=0,
+            freeze=[0], 
             save_period=-1,
             local_rank=-1,
             entity=None,
             upload_dataset=False,
             bbox_interval=-1,
-            artifact_alias="latest"
+            artifact_alias="latest",
+            save_initial_weights=False,
+            rewind_weights=False,
+            optimizer='SGD',
+            cos_lr=False # --- FIX for AttributeError ---
         )
         
         # Manually create and set the `save_dir` attribute
@@ -331,7 +335,7 @@ if __name__ == '__main__':
     
     # Display the current time and location
     print("--- Script Start ---")
-    print("Current Time: Wednesday, July 9, 2025 at 8:58 AM +06")
+    print("Current Time: Wednesday, July 9, 2025 at 9:31 AM +06")
     print("Location: Dhaka, Dhaka Division, Bangladesh")
     print("--------------------")
 
