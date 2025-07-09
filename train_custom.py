@@ -189,112 +189,126 @@ def main(opt):
         print("Process stopped after pruning and saving the model.")
         return
 
-    # --- Step 4: Retrain the pruned model for 10 epochs ---
-    print("\n--- Step 4: Retraining the pruned model for 10 epochs ---")
-    hyp_path = 'data/hyps/hyp.scratch-low.yaml'
-    # Ensure a config file path is available
-    cfg_path = opt.cfg or (model.yaml['cfg'] if hasattr(model, 'yaml') and 'cfg' in model.yaml else '')
-    if not cfg_path:
-        print("Warning: Model config (.yaml) not found. You may need to specify it with --cfg.")
+    # --- FIX for PyTorch 2.6 UnpicklingError in train.py ---
+    # The train.py script from YOLOv5 loads checkpoints using torch.load(), which
+    # in PyTorch 2.6 defaults to weights_only=True. This causes an error when
+    # loading checkpoints that contain model objects. Since we cannot edit train.py,
+    # we monkey-patch torch.load to force weights_only=False for the duration
+    # of the training calls. This is a targeted workaround.
+    _original_torch_load = torch.load
 
-    retrain_opt = argparse.Namespace(
-        weights=pruned_weights_path,
-        cfg=cfg_path,
-        data=opt.data,
-        hyp=hyp_path,
-        epochs=10,
-        batch_size=opt.batch_size,
-        imgsz=opt.img_size,
-        rect=False,
-        resume=False,
-        nosave=False,
-        noval=False,
-        noautoanchor=False,
-        evolve=None,
-        bucket='',
-        cache=opt.cache,
-        image_weights=False,
-        device=str(device), # Pass device as a string
-        multi_scale=False,
-        single_cls=False,
-        adam=False,
-        sync_bn=False,
-        workers=8,
-        project='runs/train',
-        name='exp_retrain_10_epochs',
-        exist_ok=False,
-        quad=False,
-        linear_lr=False,
-        label_smoothing=0.0,
-        patience=100,
-        freeze=0,
-        save_period=-1,
-        local_rank=-1,
-        entity=None,
-        upload_dataset=False,
-        bbox_interval=-1,
-        artifact_alias="latest"
-    )
-    
-    # --- FIX for AttributeError ---
-    # Manually create and set the `save_dir` attribute, which is expected by the train function.
-    save_dir = Path(increment_path(Path(retrain_opt.project) / retrain_opt.name, exist_ok=retrain_opt.exist_ok))
-    retrain_opt.save_dir = str(save_dir)
+    def patched_torch_load(*args, **kwargs):
+        kwargs['weights_only'] = False
+        return _original_torch_load(*args, **kwargs)
 
-    # Create a Callbacks instance
-    callbacks = Callbacks()
-    
-    # Call the train function with the correct arguments
-    train(retrain_opt.hyp, retrain_opt, device, callbacks)
-    print(f"Retraining complete after 10 epochs.")
+    torch.load = patched_torch_load
+    print("\nApplied temporary patch to torch.load for compatibility with PyTorch 2.6+.")
 
-    # --- Step 5: Average the pruned and retrained weights ---
-    print("\n--- Step 5: Averaging pruned and retrained weights ---")
-    
-    # Path to the weights from the last training run now uses the generated save_dir
-    last_weights_10_epochs = save_dir / 'weights' / 'last.pt'
+    try:
+        # --- Step 4: Retrain the pruned model for 10 epochs ---
+        print("\n--- Step 4: Retraining the pruned model for 10 epochs ---")
+        hyp_path = 'data/hyps/hyp.scratch-low.yaml'
+        # Ensure a config file path is available
+        cfg_path = opt.cfg or (model.yaml['cfg'] if hasattr(model, 'yaml') and 'cfg' in model.yaml else '')
+        if not cfg_path:
+            print("Warning: Model config (.yaml) not found. You may need to specify it with --cfg.")
 
-    pruned_model_ckpt = torch.load(pruned_weights_path, map_location=device, weights_only=False)
-    retrained_model_ckpt = torch.load(last_weights_10_epochs, map_location=device, weights_only=False)
+        retrain_opt = argparse.Namespace(
+            weights=pruned_weights_path,
+            cfg=cfg_path,
+            data=opt.data,
+            hyp=hyp_path,
+            epochs=10,
+            batch_size=opt.batch_size,
+            imgsz=opt.img_size,
+            rect=False,
+            resume=False,
+            nosave=False,
+            noval=False,
+            noautoanchor=False,
+            noplots=False,
+            evolve=None,
+            bucket='',
+            cache=opt.cache,
+            image_weights=False,
+            device=str(device),
+            multi_scale=False,
+            single_cls=False,
+            adam=False,
+            sync_bn=False,
+            workers=8,
+            project='runs/train',
+            name='exp_retrain_10_epochs',
+            exist_ok=False,
+            quad=False,
+            linear_lr=False,
+            label_smoothing=0.0,
+            patience=100,
+            freeze=0,
+            save_period=-1,
+            local_rank=-1,
+            entity=None,
+            upload_dataset=False,
+            bbox_interval=-1,
+            artifact_alias="latest"
+        )
+        
+        # Manually create and set the `save_dir` attribute
+        save_dir = Path(increment_path(Path(retrain_opt.project) / retrain_opt.name, exist_ok=retrain_opt.exist_ok))
+        retrain_opt.save_dir = str(save_dir)
 
-    pruned_model = pruned_model_ckpt['model']
-    retrained_model = retrained_model_ckpt['model']
+        callbacks = Callbacks()
+        train(retrain_opt.hyp, retrain_opt, device, callbacks)
+        print(f"Retraining complete after 10 epochs.")
 
-    # Create a new model instance to hold the averaged weights
-    averaged_model = attempt_load(opt.initial_weights, device=device)
-    
-    pruned_state_dict = pruned_model.state_dict()
-    retrained_state_dict = retrained_model.state_dict()
-    averaged_state_dict = averaged_model.state_dict()
+        # --- Step 5: Average the pruned and retrained weights ---
+        print("\n--- Step 5: Averaging pruned and retrained weights ---")
+        
+        last_weights_10_epochs = save_dir / 'weights' / 'last.pt'
 
-    for key in pruned_state_dict:
-        if key in retrained_state_dict and pruned_state_dict[key].data.dtype.is_floating_point:
-            averaged_state_dict[key].data = (pruned_state_dict[key].data + retrained_state_dict[key].data) / 2.0
-        else: # For non-floating point tensors or mismatched keys, copy from the original pruned model
-            averaged_state_dict[key].data = pruned_state_dict[key].data
-            
-    averaged_model.load_state_dict(averaged_state_dict)
+        pruned_model_ckpt = torch.load(pruned_weights_path, map_location=device) # Already patched
+        retrained_model_ckpt = torch.load(last_weights_10_epochs, map_location=device) # Already patched
 
-    averaged_weights_path = os.path.join(opt.project, 'yolov5s_averaged.pt')
-    avg_save_dict = {'model': averaged_model, 'optimizer': None, 'epoch': -1}
-    torch.save(avg_save_dict, averaged_weights_path)
-    print(f"Averaged model weights saved to {averaged_weights_path}")
+        pruned_model = pruned_model_ckpt['model']
+        retrained_model = retrained_model_ckpt['model']
 
-    # --- Step 6: Continue training with averaged weights for 20 epochs ---
-    print("\n--- Step 6: Continuing training with averaged weights for 20 more epochs ---")
-    final_train_opt = retrain_opt
-    final_train_opt.weights = averaged_weights_path
-    final_train_opt.epochs = 20 # Train for 20 additional epochs
-    final_train_opt.name = 'exp_final_20_epochs'
-    
-    # Manually set save_dir for the final training run
-    final_save_dir = Path(increment_path(Path(final_train_opt.project) / final_train_opt.name, exist_ok=final_train_opt.exist_ok))
-    final_train_opt.save_dir = str(final_save_dir)
+        averaged_model = attempt_load(opt.initial_weights, device=device)
+        
+        pruned_state_dict = pruned_model.state_dict()
+        retrained_state_dict = retrained_model.state_dict()
+        averaged_state_dict = averaged_model.state_dict()
 
-    # Call the train function again for the final training phase
-    train(final_train_opt.hyp, final_train_opt, device, callbacks)
-    print(f"Final training complete.")
-    print("\nProcess finished successfully.")
+        for key in pruned_state_dict:
+            if key in retrained_state_dict and pruned_state_dict[key].data.dtype.is_floating_point:
+                averaged_state_dict[key].data = (pruned_state_dict[key].data + retrained_state_dict[key].data) / 2.0
+            else:
+                averaged_state_dict[key].data = pruned_state_dict[key].data
+                
+        averaged_model.load_state_dict(averaged_state_dict)
+
+        averaged_weights_path = os.path.join(opt.project, 'yolov5s_averaged.pt')
+        avg_save_dict = {'model': averaged_model, 'optimizer': None, 'epoch': -1}
+        torch.save(avg_save_dict, averaged_weights_path)
+        print(f"Averaged model weights saved to {averaged_weights_path}")
+
+        # --- Step 6: Continue training with averaged weights for 20 epochs ---
+        print("\n--- Step 6: Continuing training with averaged weights for 20 more epochs ---")
+        final_train_opt = retrain_opt
+        final_train_opt.weights = averaged_weights_path
+        final_train_opt.epochs = 20
+        final_train_opt.name = 'exp_final_20_epochs'
+        
+        final_save_dir = Path(increment_path(Path(final_train_opt.project) / final_train_opt.name, exist_ok=final_train_opt.exist_ok))
+        final_train_opt.save_dir = str(final_save_dir)
+
+        train(final_train_opt.hyp, final_train_opt, device, callbacks)
+        print(f"Final training complete.")
+
+    finally:
+        # IMPORTANT: Restore the original function to avoid side effects elsewhere.
+        torch.load = _original_torch_load
+        print("\nRestored original torch.load function.")
+        print("\nProcess finished successfully.")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="YOLOv5 Pruning, Retraining, and Averaging Script")
@@ -317,7 +331,7 @@ if __name__ == '__main__':
     
     # Display the current time and location
     print("--- Script Start ---")
-    print("Current Time: Tuesday, July 8, 2025 at 12:42 PM +06")
+    print("Current Time: Wednesday, July 9, 2025 at 8:58 AM +06")
     print("Location: Dhaka, Dhaka Division, Bangladesh")
     print("--------------------")
 
