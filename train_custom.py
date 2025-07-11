@@ -1,5 +1,4 @@
 import torch
-import torch.nn as nn
 import numpy as np
 import os
 import argparse
@@ -16,7 +15,6 @@ if not (Path('train.py').exists() and Path('utils').is_dir()):
     if yolov5_root and Path(yolov5_root).exists():
         sys.path.append(str(yolov5_root))
     else:
-        # Try default Colab path or let the error happen later
         sys.path.append('/content/yolov5')
 
 def download(url, filename="yolov5s.pt"):
@@ -111,13 +109,11 @@ def save_to_drive(src_path, drive_folder_path):
     dst = os.path.join('/content/drive/My Drive', drive_folder_path)
     try:
         if os.path.isdir(src_path):
-            # Directory: remove existing and copytree
             if os.path.exists(dst):
                 shutil.rmtree(dst)
             shutil.copytree(src_path, dst)
             print(f"Copied directory {src_path} to {dst}")
         elif os.path.isfile(src_path):
-            # File: make sure destination directory exists
             os.makedirs(dst, exist_ok=True)
             shutil.copy2(src_path, dst)
             print(f"Copied file {src_path} to {dst}")
@@ -125,7 +121,6 @@ def save_to_drive(src_path, drive_folder_path):
             print(f"Source path {src_path} does not exist.")
     except Exception as e:
         print(f"Could not save to drive: {e}")
-
 
 def main(opt):
     logging.basicConfig(level=logging.INFO)
@@ -137,7 +132,6 @@ def main(opt):
     model = attempt_load(opt.initial_weights, device=device)
     print("Model loaded successfully.")
 
-    # Set requires_grad=True for all parameters
     for param in model.parameters():
         param.requires_grad = True
     print("Set requires_grad=True for all model parameters.")
@@ -152,11 +146,11 @@ def main(opt):
     save_dict = {'model': model, 'optimizer': None, 'epoch': -1}
     torch.save(save_dict, pruned_weights_path)
     print("Pruned model weights saved.")
-    pruned_model_saved_folder_name=f"exp_retrain_{opt.pruning_epoch}_epochs"
+    pruned_model_saved_folder_name = f"exp_retrain_{opt.pruning_epoch}_epochs"
 
     # Optionally save to Google Drive
     if opt.save_to_drive:
-        base_drive_path = '/content/yolov5/runs/train/{pruned_model_saved_folder_name}'
+        base_drive_path = f'/content/yolov5/runs/train/{pruned_model_saved_folder_name}'
         save_to_drive(base_drive_path, opt.drive_folder_path)
 
     if not train or not Callbacks or not increment_path:
@@ -173,7 +167,6 @@ def main(opt):
     print("\nApplied temporary patch to torch.load for compatibility with PyTorch 2.6+.")
 
     try:
-        
         # 4. Retrain pruned model for opt.pruning_epoch epochs
         print(f"\n--- Step 4: Retraining the pruned model for {opt.pruning_epoch} epochs ---")
         hyp_path = 'data/hyps/hyp.scratch-low.yaml'
@@ -222,7 +215,8 @@ def main(opt):
             save_initial_weights=False,
             rewind_weights=False,
             optimizer='SGD',
-            cos_lr=False
+            cos_lr=False,
+            seed=0,  # <-- Fix: add seed
         )
         save_dir = Path(increment_path(Path(retrain_opt.project) / retrain_opt.name, exist_ok=retrain_opt.exist_ok))
         retrain_opt.save_dir = str(save_dir)
@@ -258,10 +252,12 @@ def main(opt):
 
         # 6. Final training for opt.total_epochs epochs
         print(f"\n--- Step 6: Continuing training with averaged weights for {opt.total_epochs} more epochs ---")
-        final_train_opt = retrain_opt
+        # Build new Namespace for final training, copying retrain_opt and updating fields
+        final_train_opt = argparse.Namespace(**vars(retrain_opt))
         final_train_opt.weights = averaged_weights_path
         final_train_opt.epochs = opt.total_epochs
         final_train_opt.name = f'exp_final_{opt.total_epochs}_epochs'
+        final_train_opt.seed = 0  # <-- Fix: ensure seed present
         final_save_dir = Path(increment_path(Path(final_train_opt.project) / final_train_opt.name, exist_ok=final_train_opt.exist_ok))
         final_train_opt.save_dir = str(final_save_dir)
 
@@ -271,10 +267,6 @@ def main(opt):
         if opt.save_to_drive:
             base_drive_path = f'/content/yolov5/runs/train/{final_train_opt.name}'
             save_to_drive(base_drive_path, opt.drive_folder_path)
-
-        # if opt.save_to_drive:
-        #     last_weights_final = final_save_dir / 'weights' / 'last.pt'
-        #     save_to_drive(str(last_weights_final), opt.drive_folder_path)
 
     finally:
         torch.load = _original_torch_load
