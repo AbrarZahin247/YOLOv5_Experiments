@@ -7,10 +7,9 @@ from pathlib import Path
 import requests
 from tqdm import tqdm
 import sys
-import shutil # Import shutil for save_to_drive
+import shutil
 
 # ---- YOLOv5 IMPORT FIX ----
-# This block is now more of a fallback, as changing the working directory is the primary fix.
 if not (Path('train.py').exists() and Path('utils').is_dir()):
     yolov5_root = os.environ.get('YOLOV5_ROOT', '/content/yolov5')
     if Path(yolov5_root).exists() and str(yolov5_root) not in sys.path:
@@ -25,7 +24,7 @@ except ImportError as e:
     print("FATAL: Could not import YOLOv5 utilities. This script requires a YOLOv5 environment.")
     print(f"ImportError: {e}")
     print("Please run this script from the root of a cloned YOLOv5 repository.")
-    sys.exit(1) # Exit if imports fail
+    sys.exit(1)
 
 def download(url, filename="yolov5s.pt"):
     print(f"Downloading {filename} from {url}...")
@@ -57,28 +56,20 @@ def attempt_load(weights, device=None, inplace=True, fuse=True):
             download(url_v6, filename=str(model_path))
 
     if not model_path.exists():
-        raise FileNotFoundError(f"'{weights}' does not exist and download failed from all sources.")
+        raise FileNotFoundError(f"'{weights}' does not exist and download failed.")
     ckpt = torch.load(weights, map_location=device, weights_only=False)
     model = ckpt['model'].float()
     model.eval()
     if fuse and hasattr(model, 'fuse'):
-        print("Fusing model...")
         model.fuse()
     if device:
         model.to(device)
     if not inplace:
         model = model.copy()
-    logging.info(f'Model summary: {len(list(model.modules()))} modules, {sum(p.numel() for p in model.parameters())} parameters')
     return model
 
 def get_model_weights_as_vector(model):
-    weights_vector = []
-    for param in model.parameters():
-        if param.requires_grad:
-            weights_vector.append(param.data.clone().cpu().numpy().flatten())
-    if not weights_vector:
-        raise ValueError("No parameters with requires_grad=True found in the model.")
-    return np.concatenate(weights_vector)
+    return np.concatenate([p.data.clone().cpu().numpy().flatten() for p in model.parameters() if p.requires_grad])
 
 def set_model_weights_from_vector(model, weights_vector):
     pointer = 0
@@ -93,15 +84,13 @@ def zero_top_weights(model, percentile=90):
     threshold = np.percentile(np.abs(weights), percentile)
     weights[np.abs(weights) > threshold] = 0
     set_model_weights_from_vector(model, weights)
-    print(f"Zeroed out weights above the {percentile}th percentile (magnitude > {threshold:.4f})")
+    print(f"Zeroed weights above the {percentile}th percentile (magnitude > {threshold:.4f})")
 
 def save_to_drive(src_path, drive_folder_path):
-    """Copies a file or directory to Google Drive."""
     if not drive_folder_path:
         print("Skipping save to drive: --drive-folder-path not specified.")
         return
     
-    # This assumes you have mounted your drive at /content/drive
     drive_base = '/content/drive/My Drive'
     if not Path(drive_base).exists():
         print("Google Drive not mounted at /content/drive. Cannot save.")
@@ -127,7 +116,6 @@ def save_to_drive(src_path, drive_folder_path):
     except Exception as e:
         print(f"Could not save to drive: {e}")
 
-
 def main(opt):
     logging.basicConfig(level=logging.INFO)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -139,7 +127,7 @@ def main(opt):
     for param in model.parameters():
         param.requires_grad = True
 
-    # 2. Zero out top X% of weights by magnitude (pruning)
+    # 2. Zero out top X% of weights
     print(f"\n--- Step 2: Zeroing out top {100-opt.prune_keep_percent}% of weights ---")
     zero_top_weights(model, percentile=100 - opt.prune_keep_percent)
 
@@ -158,7 +146,7 @@ def main(opt):
     
     try:
         # 4. Retrain pruned model
-        print(f"\n--- Step 4: Retraining the pruned model for {opt.pruning_epoch} epochs ---")
+        print(f"\n--- Step 4: Retraining pruned model for {opt.pruning_epoch} epochs ---")
         retrain_opt = argparse.Namespace(
             weights=pruned_weights_path, cfg=opt.cfg, data=opt.data,
             hyp='data/hyps/hyp.scratch-low.yaml', epochs=opt.pruning_epoch,
@@ -171,12 +159,14 @@ def main(opt):
             patience=100, freeze=[0], save_period=-1, seed=0, local_rank=-1,
             entity=None, upload_dataset=False, bbox_interval=-1, artifact_alias="latest"
         )
-        # The train function returns the final results object which contains the save_dir
-        results = train(retrain_opt.hyp, retrain_opt, device, callbacks=Callbacks())
-        retrain_save_dir = results.save_dir
+        
+        # FIX: Manually create and assign the save_dir before calling train()
+        retrain_save_dir = str(increment_path(Path(retrain_opt.project) / retrain_opt.name, exist_ok=retrain_opt.exist_ok))
+        retrain_opt.save_dir = retrain_save_dir
+
+        train(retrain_opt.hyp, retrain_opt, device, callbacks=Callbacks())
         print(f"Retraining complete. Results saved to {retrain_save_dir}")
 
-        # LOGICAL FIX: Save to drive AFTER training is complete
         if opt.save_to_drive:
             save_to_drive(retrain_save_dir, opt.drive_folder_path)
 
@@ -186,7 +176,7 @@ def main(opt):
         pruned_model_ckpt = torch.load(pruned_weights_path, map_location=device)
         retrained_model_ckpt = torch.load(last_weights_path, map_location=device)
 
-        averaged_model = pruned_model_ckpt['model'] # Start with the pruned model structure
+        averaged_model = pruned_model_ckpt['model']
         pruned_state_dict = averaged_model.state_dict()
         retrained_state_dict = retrained_model_ckpt['model'].state_dict()
         
@@ -205,17 +195,19 @@ def main(opt):
             save_to_drive(averaged_weights_path, opt.drive_folder_path)
 
         # 6. Final training
-        print(f"\n--- Step 6: Final training for {opt.total_epochs} more epochs ---")
+        print(f"\n--- Step 6: Final training for {opt.total_epochs} epochs ---")
         final_train_opt = argparse.Namespace(**vars(retrain_opt))
         final_train_opt.weights = averaged_weights_path
         final_train_opt.epochs = opt.total_epochs
         final_train_opt.name = f'exp_final_{opt.total_epochs}_epochs'
         
-        final_results = train(final_train_opt.hyp, final_train_opt, device, callbacks=Callbacks())
-        final_save_dir = final_results.save_dir
+        # FIX: Manually create and assign the save_dir for the final training run
+        final_save_dir = str(increment_path(Path(final_train_opt.project) / final_train_opt.name, exist_ok=final_train_opt.exist_ok))
+        final_train_opt.save_dir = final_save_dir
+        
+        train(final_train_opt.hyp, final_train_opt, device, callbacks=Callbacks())
         print(f"Final training complete. Results saved to {final_save_dir}")
 
-        # LOGICAL FIX: Save to drive AFTER final training is complete
         if opt.save_to_drive:
             save_to_drive(final_save_dir, opt.drive_folder_path)
 
@@ -232,7 +224,7 @@ if __name__ == '__main__':
     parser.add_argument('--cfg', type=str, default='', help='model.yaml path')
     parser.add_argument('--img-size', type=int, default=640, help='image size')
     parser.add_argument('--batch-size', type=int, default=16, help='batch size')
-    parser.add_argument('--project', default='runs/custom_train', help='save directory')
+    parser.add_argument('--project', default='runs/custom_train', help='save directory for results')
     parser.add_argument('--cache', action='store_true', help='cache images for faster training')
     parser.add_argument('--pruning-epoch', type=int, default=3, help='Epochs to retrain after pruning')
     parser.add_argument('--total-epochs', type=int, default=5, help='Epochs for final training')
