@@ -48,6 +48,7 @@ def attempt_load(weights, device=None, inplace=True, fuse=True):
 
     if not model_path.exists():
         raise FileNotFoundError(f"'{weights}' does not exist and download failed from all sources.")
+    # Set weights_only=False to load the full model object, not just weights
     ckpt = torch.load(weights, map_location=device, weights_only=False)
     model = ckpt['model'].float()
     model.eval()
@@ -158,13 +159,13 @@ def main(opt):
         print("Process stopped after pruning and saving the model.")
         return
 
-    # PyTorch 2.6 weights_only workaround
+    # PyTorch weights_only workaround
     _original_torch_load = torch.load
     def patched_torch_load(*args, **kwargs):
         kwargs['weights_only'] = False
         return _original_torch_load(*args, **kwargs)
     torch.load = patched_torch_load
-    print("\nApplied temporary patch to torch.load for compatibility with PyTorch 2.6+.")
+    print("\nApplied temporary patch to torch.load for compatibility.")
 
     try:
         # 4. Retrain pruned model for opt.pruning_epoch epochs
@@ -202,21 +203,19 @@ def main(opt):
             name=pruned_model_saved_folder_name,
             exist_ok=False,
             quad=False,
-            linear_lr=False,
+            cos_lr=False,
             label_smoothing=0.0,
             patience=100,
-            freeze=[0], 
+            freeze=[0],
             save_period=-1,
             local_rank=-1,
             entity=None,
             upload_dataset=False,
             bbox_interval=-1,
             artifact_alias="latest",
-            save_initial_weights=False,
-            rewind_weights=False,
+            seed=0,
+            linear_lr=False,
             optimizer='SGD',
-            cos_lr=False,
-            seed=0,  # <-- Fix: add seed
         )
         save_dir = Path(increment_path(Path(retrain_opt.project) / retrain_opt.name, exist_ok=retrain_opt.exist_ok))
         retrain_opt.save_dir = str(save_dir)
@@ -230,34 +229,52 @@ def main(opt):
         last_weights_10_epochs = save_dir / 'weights' / 'last.pt'
         pruned_model_ckpt = torch.load(pruned_weights_path, map_location=device)
         retrained_model_ckpt = torch.load(last_weights_10_epochs, map_location=device)
+
         pruned_model = pruned_model_ckpt['model']
         retrained_model = retrained_model_ckpt['model']
-        averaged_model = attempt_load(opt.initial_weights, device=device)
+        averaged_model = attempt_load(opt.initial_weights, device=device) # Load a fresh model to hold the result
+
         pruned_state_dict = pruned_model.state_dict()
         retrained_state_dict = retrained_model.state_dict()
         averaged_state_dict = averaged_model.state_dict()
-        for key in pruned_state_dict:
-            if key in retrained_state_dict and pruned_state_dict[key].data.dtype.is_floating_point:
-                averaged_state_dict[key].data = (pruned_state_dict[key].data + retrained_state_dict[key].data) / 2.0
-            else:
-                averaged_state_dict[key].data = pruned_state_dict[key].data
+
+        for key in averaged_state_dict:
+            if key in pruned_state_dict and key in retrained_state_dict:
+                p_tensor = pruned_state_dict[key]
+                r_tensor = retrained_state_dict[key]
+                
+                # Check if tensor shapes are the same before averaging
+                if p_tensor.shape == r_tensor.shape:
+                    # If shapes match, average the weights
+                    if p_tensor.dtype.is_floating_point:
+                        averaged_state_dict[key].data = (p_tensor.data + r_tensor.data) / 2.0
+                    else:
+                        averaged_state_dict[key].data = p_tensor.data # Keep non-float data
+                else:
+                    # If shapes mismatch (e.g., final detection layer), use the retrained weights
+                    print(f"Shape mismatch for key '{key}': pruned {p_tensor.shape} vs retrained {r_tensor.shape}. Using retrained weights.")
+                    averaged_state_dict[key].data = r_tensor.data
+            elif key in retrained_state_dict:
+                # Fallback to retrained weights if key is not in pruned model for some reason
+                averaged_state_dict[key].data = retrained_state_dict[key].data
+        
         averaged_model.load_state_dict(averaged_state_dict)
         averaged_weights_path = os.path.join(opt.project, 'yolov5_averaged.pt')
         avg_save_dict = {'model': averaged_model, 'optimizer': None, 'epoch': -1}
         torch.save(avg_save_dict, averaged_weights_path)
         print(f"Averaged model weights saved to {averaged_weights_path}")
 
+
         if opt.save_to_drive:
             save_to_drive(averaged_weights_path, opt.drive_folder_path)
 
         # 6. Final training for opt.total_epochs epochs
         print(f"\n--- Step 6: Continuing training with averaged weights for {opt.total_epochs} more epochs ---")
-        # Build new Namespace for final training, copying retrain_opt and updating fields
         final_train_opt = argparse.Namespace(**vars(retrain_opt))
         final_train_opt.weights = averaged_weights_path
         final_train_opt.epochs = opt.total_epochs
         final_train_opt.name = f'exp_final_{opt.total_epochs}_epochs'
-        final_train_opt.seed = 0  # <-- Fix: ensure seed present
+        final_train_opt.seed = 0
         final_save_dir = Path(increment_path(Path(final_train_opt.project) / final_train_opt.name, exist_ok=final_train_opt.exist_ok))
         final_train_opt.save_dir = str(final_save_dir)
 
@@ -288,6 +305,7 @@ if __name__ == '__main__':
     parser.add_argument('--save-to-drive', action='store_true', help='Save results to Google Drive')
     parser.add_argument('--drive-folder-path', type=str, default='', help='Google Drive folder to save results')
 
-    opt = parser.parse_args()
+    # Use parse_known_args to avoid conflicts if running in environments like Jupyter
+    opt, _ = parser.parse_known_args()
     print("--- Script Start ---")
     main(opt)
