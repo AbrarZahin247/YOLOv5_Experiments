@@ -43,10 +43,10 @@ except ImportError as e:
     print(f"ImportError: {e}")
     sys.exit(1)
 
-# ---- NEW: DYNAMIC DRIVE SAVING CALLBACK ----
+# ---- DYNAMIC DRIVE SAVING CALLBACK ----
 class DriveSyncCallback(Callbacks):
     """
-    A YOLOv5 callback to automatically save best.pt and last.pt to Google Drive
+    A YOLOv5 callback to automatically save best.pt, last.pt, and results.csv to Google Drive
     at the end of each epoch.
     """
     def __init__(self, local_run_dir, drive_run_dir):
@@ -56,33 +56,19 @@ class DriveSyncCallback(Callbacks):
         self.weights_dir = self.local_run_dir / 'weights'
         self.drive_weights_dir = self.drive_run_dir / 'weights'
         
-        # Ensure the destination directory on Drive exists
         print(f"Drive Sync enabled. Checkpoints will be saved to: {self.drive_weights_dir}")
         self.drive_weights_dir.mkdir(parents=True, exist_ok=True)
         
     def on_fit_epoch_end(self, epoch, results, best, fi, last, stop, best_fitness, early_stop_epoch):
-        """
-        Runs at the end of each epoch to sync files.
-        """
-        # Define paths to the local checkpoint files
-        last_pt = self.weights_dir / 'last.pt'
-        best_pt = self.weights_dir / 'best.pt'
-        
-        # Copy last.pt if it exists
-        if last_pt.exists():
-            try:
-                shutil.copy2(str(last_pt), self.drive_weights_dir)
-            except Exception as e:
-                print(f"WARNING: Failed to copy last.pt to Drive: {e}")
+        """Runs at the end of each epoch to sync files."""
+        for f in ['last.pt', 'best.pt']:
+            local_file = self.weights_dir / f
+            if local_file.exists():
+                try:
+                    shutil.copy2(str(local_file), self.drive_weights_dir)
+                except Exception as e:
+                    print(f"WARNING: Failed to copy {f} to Drive: {e}")
 
-        # Copy best.pt if it exists
-        if best_pt.exists():
-            try:
-                shutil.copy2(str(best_pt), self.drive_weights_dir)
-            except Exception as e:
-                print(f"WARNING: Failed to copy best.pt to Drive: {e}")
-        
-        # Also copy results.csv to keep track of metrics
         results_csv = self.local_run_dir / 'results.csv'
         if results_csv.exists():
             try:
@@ -166,7 +152,6 @@ def main(opt):
                         f"retrain{opt.pruning_epoch}e_final{opt.total_epochs}e")
     
     os.makedirs(opt.project, exist_ok=True)
-    # FIXED: Ensure log_file_path is a Path object, not a string.
     log_file_path = Path(opt.project) / f"{descriptive_name}.log"
     pruned_weights_path = Path(opt.project) / f'{descriptive_name}_pruned.pt'
     averaged_weights_path = Path(opt.project) / f'{descriptive_name}_averaged.pt'
@@ -184,7 +169,7 @@ def main(opt):
 
     # --- SETUP LOGGING ---
     original_stdout = sys.stdout
-    sys.stdout = Logger(str(log_file_path)) # Logger expects a string path
+    sys.stdout = Logger(str(log_file_path))
     
     print(f"Starting run: {descriptive_name}")
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -202,7 +187,7 @@ def main(opt):
             print("\n--- Step 1 & 2: Loading and Pruning pre-trained model ---")
             model = attempt_load(opt.initial_weights, device=device)
             
-            # FIXED: Ensure all parameters are marked as trainable before pruning.
+            # This loop is essential to prevent the ValueError
             for param in model.parameters():
                 param.requires_grad = True
                 
@@ -210,7 +195,7 @@ def main(opt):
             torch.save({'model': model}, pruned_weights_path)
             print(f"Pruned model weights saved to {pruned_weights_path}")
             if drive_base_dir:
-                save_to_drive(pruned_weights_path, drive_base_dir / pruned_weights_path.name)
+                save_to_drive(str(pruned_weights_path), drive_base_dir / pruned_weights_path.name)
         else:
             print(f"\n--- SKIPPING Step 1 & 2: Found existing pruned model at {pruned_weights_path} ---")
 
@@ -227,11 +212,11 @@ def main(opt):
                 hyp='data/hyps/hyp.scratch-low.yaml', epochs=opt.pruning_epoch,
                 batch_size=opt.batch_size, imgsz=opt.img_size,
                 project=opt.project, name=retrain_name, exist_ok=True,
-                device=str(device), cache=opt.cache, workers=8,
-                rect=False, nosave=False, noval=False, noautoanchor=False, noplots=False, evolve=None,
-                bucket='', multi_scale=False, single_cls=False, optimizer='SGD', sync_bn=False,
-                quad=False, cos_lr=False, label_smoothing=0.0, patience=100, freeze=[0], save_period=-1,
-                seed=0, local_rank=-1, entity=None, upload_dataset=False, bbox_interval=-1, artifact_alias="latest"
+                device=str(device), cache=opt.cache, workers=8, rect=False, nosave=False, noval=False, 
+                noautoanchor=False, noplots=False, evolve=None, bucket='', multi_scale=False, 
+                single_cls=False, optimizer='SGD', sync_bn=False, quad=False, cos_lr=False, 
+                label_smoothing=0.0, patience=100, freeze=[0], save_period=-1, seed=0, local_rank=-1, 
+                entity=None, upload_dataset=False, bbox_interval=-1, artifact_alias="latest"
             )
             retrain_opt.save_dir = str(retrain_save_dir)
             if opt.resume_run and (retrain_save_dir / 'weights' / 'last.pt').exists():
@@ -259,7 +244,7 @@ def main(opt):
             torch.save({'model': averaged_model}, averaged_weights_path)
             print(f"Averaged model weights saved to {averaged_weights_path}")
             if drive_base_dir:
-                save_to_drive(averaged_weights_path, drive_base_dir / averaged_weights_path.name)
+                save_to_drive(str(averaged_weights_path), drive_base_dir / averaged_weights_path.name)
         else:
             print(f"\n--- SKIPPING Step 5: Found existing averaged model at {averaged_weights_path} ---")
 
@@ -276,11 +261,11 @@ def main(opt):
                 hyp='data/hyps/hyp.scratch-low.yaml', epochs=opt.total_epochs,
                 batch_size=opt.batch_size, imgsz=opt.img_size,
                 project=opt.project, name=final_train_name, exist_ok=True,
-                device=str(device), cache=opt.cache, workers=8,
-                rect=False, nosave=False, noval=False, noautoanchor=False, noplots=False, evolve=None,
-                bucket='', multi_scale=False, single_cls=False, optimizer='SGD', sync_bn=False,
-                quad=False, cos_lr=False, label_smoothing=0.0, patience=100, freeze=[0], save_period=-1,
-                seed=0, local_rank=-1, entity=None, upload_dataset=False, bbox_interval=-1, artifact_alias="latest"
+                device=str(device), cache=opt.cache, workers=8, rect=False, nosave=False, noval=False, 
+                noautoanchor=False, noplots=False, evolve=None, bucket='', multi_scale=False, 
+                single_cls=False, optimizer='SGD', sync_bn=False, quad=False, cos_lr=False, 
+                label_smoothing=0.0, patience=100, freeze=[0], save_period=-1, seed=0, local_rank=-1, 
+                entity=None, upload_dataset=False, bbox_interval=-1, artifact_alias="latest"
             )
             final_train_opt.save_dir = str(final_save_dir)
             if opt.resume_run and (final_save_dir / 'weights' / 'last.pt').exists():
@@ -312,7 +297,7 @@ if __name__ == '__main__':
     parser.add_argument('--cfg', type=str, default='', help='model.yaml path')
     parser.add_argument('--img-size', type=int, default=640, help='image size')
     parser.add_argument('--batch-size', type=int, default=16, help='batch size')
-    parser.add_argument('--project', default='runs/custom_train', help='local save directory')
+    parser.add__argument('--project', default='runs/custom_train', help='local save directory')
     parser.add_argument('--cache', action='store_true', help='cache images for faster training')
     parser.add_argument('--pruning-epoch', type=int, default=3, help='Epochs to retrain after pruning')
     parser.add_argument('--total-epochs', type=int, default=10, help='Epochs for final training')
