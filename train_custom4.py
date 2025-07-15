@@ -166,9 +166,10 @@ def main(opt):
                         f"retrain{opt.pruning_epoch}e_final{opt.total_epochs}e")
     
     os.makedirs(opt.project, exist_ok=True)
-    log_file_path = os.path.join(opt.project, f"{descriptive_name}.log")
-    pruned_weights_path = os.path.join(opt.project, f'{descriptive_name}_pruned.pt')
-    averaged_weights_path = os.path.join(opt.project, f'{descriptive_name}_averaged.pt')
+    # FIXED: Ensure log_file_path is a Path object, not a string.
+    log_file_path = Path(opt.project) / f"{descriptive_name}.log"
+    pruned_weights_path = Path(opt.project) / f'{descriptive_name}_pruned.pt'
+    averaged_weights_path = Path(opt.project) / f'{descriptive_name}_averaged.pt'
     
     retrain_name = f'retrain_{descriptive_name}'
     final_train_name = f'final_{descriptive_name}'
@@ -183,7 +184,7 @@ def main(opt):
 
     # --- SETUP LOGGING ---
     original_stdout = sys.stdout
-    sys.stdout = Logger(log_file_path)
+    sys.stdout = Logger(str(log_file_path)) # Logger expects a string path
     
     print(f"Starting run: {descriptive_name}")
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -197,14 +198,19 @@ def main(opt):
 
     try:
         # Step 1 & 2: Load and Prune
-        if not opt.resume_run or not Path(pruned_weights_path).exists():
+        if not opt.resume_run or not pruned_weights_path.exists():
             print("\n--- Step 1 & 2: Loading and Pruning pre-trained model ---")
             model = attempt_load(opt.initial_weights, device=device)
+            
+            # FIXED: Ensure all parameters are marked as trainable before pruning.
+            for param in model.parameters():
+                param.requires_grad = True
+                
             zero_top_weights(model, percentile=100 - opt.prune_keep_percent)
             torch.save({'model': model}, pruned_weights_path)
             print(f"Pruned model weights saved to {pruned_weights_path}")
             if drive_base_dir:
-                save_to_drive(pruned_weights_path, drive_base_dir / pruned_weights_path.name)
+                save_to_drive(str(pruned_weights_path), drive_base_dir / pruned_weights_path.name)
         else:
             print(f"\n--- SKIPPING Step 1 & 2: Found existing pruned model at {pruned_weights_path} ---")
 
@@ -217,11 +223,11 @@ def main(opt):
                 callbacks = DriveSyncCallback(local_run_dir=retrain_save_dir, drive_run_dir=drive_retrain_dir)
             
             retrain_opt = argparse.Namespace(
-                weights=pruned_weights_path, cfg=opt.cfg, data=opt.data,
+                weights=str(pruned_weights_path), cfg=opt.cfg, data=opt.data,
                 hyp='data/hyps/hyp.scratch-low.yaml', epochs=opt.pruning_epoch,
                 batch_size=opt.batch_size, imgsz=opt.img_size,
                 project=opt.project, name=retrain_name, exist_ok=True,
-                device=str(device), cache=opt.cache, workers=8, # Other common args
+                device=str(device), cache=opt.cache, workers=8,
                 rect=False, nosave=False, noval=False, noautoanchor=False, noplots=False, evolve=None,
                 bucket='', multi_scale=False, single_cls=False, optimizer='SGD', sync_bn=False,
                 quad=False, cos_lr=False, label_smoothing=0.0, patience=100, freeze=[0], save_period=-1,
@@ -229,7 +235,7 @@ def main(opt):
             )
             retrain_opt.save_dir = str(retrain_save_dir)
             if opt.resume_run and (retrain_save_dir / 'weights' / 'last.pt').exists():
-                retrain_opt.resume = True # YOLOv5 will find last.pt in save_dir
+                retrain_opt.resume = True
                 retrain_opt.weights = ''
             
             train(retrain_opt.hyp, retrain_opt, device, callbacks)
@@ -238,7 +244,7 @@ def main(opt):
             print(f"\n--- SKIPPING Step 4: Found completed retraining results in {retrain_save_dir} ---")
 
         # Step 5: Average
-        if not opt.resume_run or not Path(averaged_weights_path).exists():
+        if not opt.resume_run or not averaged_weights_path.exists():
             print("\n--- Step 5: Averaging pruned and retrained weights ---")
             best_retrain_weights = retrain_save_dir / 'weights' / 'best.pt'
             pruned_model_ckpt = torch.load(pruned_weights_path, map_location=device)
@@ -253,7 +259,7 @@ def main(opt):
             torch.save({'model': averaged_model}, averaged_weights_path)
             print(f"Averaged model weights saved to {averaged_weights_path}")
             if drive_base_dir:
-                save_to_drive(averaged_weights_path, drive_base_dir / averaged_weights_path.name)
+                save_to_drive(str(averaged_weights_path), drive_base_dir / averaged_weights_path.name)
         else:
             print(f"\n--- SKIPPING Step 5: Found existing averaged model at {averaged_weights_path} ---")
 
@@ -266,11 +272,11 @@ def main(opt):
                 callbacks = DriveSyncCallback(local_run_dir=final_save_dir, drive_run_dir=drive_final_dir)
             
             final_train_opt = argparse.Namespace(
-                weights=averaged_weights_path, cfg=opt.cfg, data=opt.data,
+                weights=str(averaged_weights_path), cfg=opt.cfg, data=opt.data,
                 hyp='data/hyps/hyp.scratch-low.yaml', epochs=opt.total_epochs,
                 batch_size=opt.batch_size, imgsz=opt.img_size,
                 project=opt.project, name=final_train_name, exist_ok=True,
-                device=str(device), cache=opt.cache, workers=8, # Other common args
+                device=str(device), cache=opt.cache, workers=8,
                 rect=False, nosave=False, noval=False, noautoanchor=False, noplots=False, evolve=None,
                 bucket='', multi_scale=False, single_cls=False, optimizer='SGD', sync_bn=False,
                 quad=False, cos_lr=False, label_smoothing=0.0, patience=100, freeze=[0], save_period=-1,
@@ -278,7 +284,7 @@ def main(opt):
             )
             final_train_opt.save_dir = str(final_save_dir)
             if opt.resume_run and (final_save_dir / 'weights' / 'last.pt').exists():
-                final_train_opt.resume = True # YOLOv5 will find last.pt in save_dir
+                final_train_opt.resume = True
                 final_train_opt.weights = ''
 
             train(final_train_opt.hyp, final_train_opt, device, callbacks)
@@ -293,7 +299,7 @@ def main(opt):
         
         print(f"\nTerminal output logging complete. Saved to {log_file_path}")
         if drive_base_dir:
-            save_to_drive(log_file_path, drive_base_dir / log_file_path.name)
+            save_to_drive(str(log_file_path), drive_base_dir / log_file_path.name)
 
         torch.load = _original_torch_load
         print("\nRestored original torch.load function.")
