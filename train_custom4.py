@@ -210,7 +210,7 @@ def main(opt):
             torch.save({'model': model}, pruned_weights_path)
             print(f"Pruned model weights saved to {pruned_weights_path}")
             if drive_base_dir:
-                save_to_drive(str(pruned_weights_path), drive_base_dir / pruned_weights_path.name)
+                save_to_drive(pruned_weights_path, drive_base_dir / pruned_weights_path.name)
         else:
             print(f"\n--- SKIPPING Step 1 & 2: Found existing pruned model at {pruned_weights_path} ---")
 
@@ -259,7 +259,7 @@ def main(opt):
             torch.save({'model': averaged_model}, averaged_weights_path)
             print(f"Averaged model weights saved to {averaged_weights_path}")
             if drive_base_dir:
-                save_to_drive(str(averaged_weights_path), drive_base_dir / averaged_weights_path.name)
+                save_to_drive(averaged_weights_path, drive_base_dir / averaged_weights_path.name)
         else:
             print(f"\n--- SKIPPING Step 5: Found existing averaged model at {averaged_weights_path} ---")
 
