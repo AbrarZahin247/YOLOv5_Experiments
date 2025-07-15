@@ -187,7 +187,6 @@ def main(opt):
             print("\n--- Step 1 & 2: Loading and Pruning pre-trained model ---")
             model = attempt_load(opt.initial_weights, device=device)
             
-            # This loop is essential to prevent the ValueError
             for param in model.parameters():
                 param.requires_grad = True
                 
@@ -297,7 +296,8 @@ if __name__ == '__main__':
     parser.add_argument('--cfg', type=str, default='', help='model.yaml path')
     parser.add_argument('--img-size', type=int, default=640, help='image size')
     parser.add_argument('--batch-size', type=int, default=16, help='batch size')
-    parser.add__argument('--project', default='runs/custom_train', help='local save directory')
+    # FIXED: Corrected the typo from add__argument to add_argument
+    parser.add_argument('--project', default='runs/custom_train', help='local save directory')
     parser.add_argument('--cache', action='store_true', help='cache images for faster training')
     parser.add_argument('--pruning-epoch', type=int, default=3, help='Epochs to retrain after pruning')
     parser.add_argument('--total-epochs', type=int, default=10, help='Epochs for final training')
