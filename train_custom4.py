@@ -224,7 +224,7 @@ def main(opt):
                 batch_size=opt.batch_size, imgsz=opt.img_size,
                 project=opt.project, name=retrain_name, exist_ok=True,
                 device=str(device), cache=opt.cache, workers=opt.workers, 
-                rect=True, resume=False, # <-- Resume attribute initialized here
+                rect=True, resume=False, image_weights=False, # <-- FIX: image_weights added
                 nosave=False, noval=False, noautoanchor=False, noplots=False, evolve=None, bucket='',
                 multi_scale=False, single_cls=False, optimizer='SGD', sync_bn=False, quad=False,
                 cos_lr=False, label_smoothing=0.0, patience=100, freeze=[0], save_period=-1,
@@ -275,7 +275,7 @@ def main(opt):
                 batch_size=opt.batch_size, imgsz=opt.img_size,
                 project=opt.project, name=final_train_name, exist_ok=True,
                 device=str(device), cache=opt.cache, workers=opt.workers,
-                rect=True, resume=False, # <-- Resume attribute initialized here
+                rect=True, resume=False, image_weights=False, # <-- FIX: image_weights added
                 nosave=False, noval=False, noautoanchor=False, noplots=False, evolve=None, bucket='',
                 multi_scale=False, single_cls=False, optimizer='SGD', sync_bn=False, quad=False,
                 cos_lr=False, label_smoothing=0.0, patience=100, freeze=[0], save_period=-1,
@@ -325,8 +325,8 @@ if __name__ == '__main__':
     parser.add_argument('--project', default='runs/custom_train', help='local save directory')
     parser.add_argument('--workers', type=int, default=2, help='max dataloader workers (2 is good for Colab)')
     parser.add_argument('--cache', action='store_true', default=True, help='cache images for faster training')
-    parser.add_argument('--pruning-epoch', type=int, default=3, help='Epochs to retrain after pruning')
-    parser.add_argument('--total-epochs', type=int, default=10, help='Epochs for final training')
+    parser.add_argument('--pruning-epoch', type=int, default=10, help='Epochs to retrain after pruning')
+    parser.add_argument('--total-epochs', type=int, default=40, help='Epochs for final training')
     parser.add_argument('--prune-keep-percent', type=float, default=90.0, help='Percent of weights to KEEP')
     parser.add_argument('--resume-run', action='store_true', help='Resume from the last saved state')
     parser.add_argument('--save-to-drive', action='store_true', help='Save all results to Google Drive')
