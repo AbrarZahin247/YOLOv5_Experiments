@@ -154,6 +154,9 @@ def save_to_drive(src_path, drive_dest_path):
     except Exception as e:
         print(f"Could not save {src_path} to drive: {e}")
 
+# ##################################################################
+# ################## MAIN FUNCTION (LOGIC MODIFIED) ################
+# ##################################################################
 def main(opt):
     # --- SETUP DESCRIPTIVE NAMES AND PATHS ---
     date_str = datetime.now().strftime('%Y-%m-%d')
@@ -161,18 +164,19 @@ def main(opt):
     prune_percent = 100 - opt.prune_keep_percent
     prune_percent_str = f'{prune_percent:g}'
 
-    descriptive_name = (f"{date_str}_{model_name}_pruned{prune_percent_str}pct_"
-                        f"retrain{opt.pruning_epoch}e_final{opt.total_epochs}e")
+    # Updated descriptive name to reflect the new workflow
+    descriptive_name = (f"{date_str}_{model_name}_initial{opt.pruning_epoch}e_pruned{prune_percent_str}pct_"
+                        f"final{opt.total_epochs}e")
     
     os.makedirs(opt.project, exist_ok=True)
     log_file_path = Path(opt.project) / f"{descriptive_name}.log"
-    pruned_weights_path = Path(opt.project) / f'{descriptive_name}_pruned.pt'
-    averaged_weights_path = Path(opt.project) / f'{descriptive_name}_averaged.pt'
+    pruned_model_path = Path(opt.project) / f'{descriptive_name}_pruned.pt'
+    averaged_model_path = Path(opt.project) / f'{descriptive_name}_averaged.pt'
     
-    retrain_name = f'retrain_{descriptive_name}'
-    final_train_name = f'final_{descriptive_name}'
-    retrain_save_dir = Path(opt.project) / retrain_name
-    final_save_dir = Path(opt.project) / final_train_name
+    initial_train_name = f'initial_train_{descriptive_name}'
+    final_train_name = f'final_train_{descriptive_name}'
+    initial_train_save_dir = Path(opt.project) / initial_train_name
+    final_train_save_dir = Path(opt.project) / final_train_name
     
     # --- SETUP DRIVE PATHS ---
     drive_base_dir = None
@@ -196,101 +200,108 @@ def main(opt):
     torch.load = patched_torch_load
 
     try:
-        # Step 1 & 2: Load and Prune
-        if not opt.resume_run or not pruned_weights_path.exists():
-            print("\n--- Step 1 & 2: Loading and Pruning pre-trained model ---")
-            model = attempt_load(opt.initial_weights, device=device)
+        # Step 1: Initial Training
+        if not opt.resume_run or not (initial_train_save_dir / 'weights' / 'best.pt').exists():
+            print(f"\n--- Step 1: Initial training for {opt.pruning_epoch} epochs ---")
+            callbacks = Callbacks()
+            if drive_base_dir:
+                drive_initial_dir = drive_base_dir / initial_train_save_dir.name
+                callbacks = DriveSyncCallback(local_run_dir=initial_train_save_dir, drive_run_dir=drive_initial_dir, save_period=10)
+            
+            initial_train_opt = argparse.Namespace(
+                weights=opt.initial_weights, cfg=opt.cfg, data=opt.data,
+                hyp='data/hyps/hyp.scratch-low.yaml', epochs=opt.pruning_epoch,
+                batch_size=opt.batch_size, imgsz=opt.img_size,
+                project=opt.project, name=initial_train_name, exist_ok=True,
+                device=str(device), cache=opt.cache, workers=opt.workers, 
+                rect=True, resume=False, image_weights=False,
+                nosave=False, noval=False, noautoanchor=False, noplots=False, evolve=None, bucket='',
+                multi_scale=False, single_cls=False, optimizer='SGD', sync_bn=False, quad=False,
+                cos_lr=False, label_smoothing=0.0, patience=100, freeze=[0], save_period=-1,
+                seed=0, local_rank=-1, entity=None, upload_dataset=False, bbox_interval=-1,
+                artifact_alias="latest"
+            )
+            initial_train_opt.save_dir = str(initial_train_save_dir)
+            if opt.resume_run and (initial_train_save_dir / 'weights' / 'last.pt').exists():
+                initial_train_opt.resume = True
+                initial_train_opt.weights = ''
+            
+            train(initial_train_opt.hyp, initial_train_opt, device, callbacks)
+            print(f"Initial training complete. Results saved to {initial_train_save_dir}")
+        else:
+            print(f"\n--- SKIPPING Step 1: Found completed initial training results in {initial_train_save_dir} ---")
+
+        # Step 2: Prune the initially trained model
+        if not opt.resume_run or not pruned_model_path.exists():
+            print("\n--- Step 2: Pruning the initially trained model ---")
+            best_initial_weights = initial_train_save_dir / 'weights' / 'best.pt'
+            model = attempt_load(str(best_initial_weights), device=device)
             for param in model.parameters():
                 param.requires_grad = True
             zero_top_weights(model, percentile=100 - opt.prune_keep_percent)
-            torch.save({'model': model}, pruned_weights_path)
-            print(f"Pruned model weights saved to {pruned_weights_path}")
+            torch.save({'model': model}, pruned_model_path)
+            print(f"Pruned model weights saved to {pruned_model_path}")
             if drive_base_dir:
-                save_to_drive(str(pruned_weights_path), drive_base_dir / pruned_weights_path.name)
+                save_to_drive(str(pruned_model_path), drive_base_dir / pruned_model_path.name)
         else:
-            print(f"\n--- SKIPPING Step 1 & 2: Found existing pruned model at {pruned_weights_path} ---")
+            print(f"\n--- SKIPPING Step 2: Found existing pruned model at {pruned_model_path} ---")
 
-        # Step 4: Retrain
-        if not opt.resume_run or not (retrain_save_dir / 'weights' / 'best.pt').exists():
-            print(f"\n--- Step 4: Retraining pruned model for {opt.pruning_epoch} epochs ---")
+        # Step 3: Average the pre-pruned and post-pruned models
+        if not opt.resume_run or not averaged_model_path.exists():
+            print("\n--- Step 3: Averaging pre-pruned and post-pruned weights ---")
+            best_initial_weights = initial_train_save_dir / 'weights' / 'best.pt'
+            initial_model_ckpt = torch.load(str(best_initial_weights), map_location=device)
+            pruned_model_ckpt = torch.load(pruned_model_path, map_location=device)
+            
+            averaged_model = initial_model_ckpt['model'] # Start with the initial model structure
+            initial_state_dict = averaged_model.state_dict()
+            pruned_state_dict = pruned_model_ckpt['model'].state_dict()
+
+            for key in initial_state_dict:
+                if key in pruned_state_dict and initial_state_dict[key].dtype.is_floating_point:
+                    initial_state_dict[key].data = (initial_state_dict[key].data + pruned_state_dict[key].data) / 2.0
+            
+            averaged_model.load_state_dict(initial_state_dict)
+            torch.save({'model': averaged_model}, averaged_model_path)
+            print(f"Averaged model weights saved to {averaged_model_path}")
+            if drive_base_dir:
+                save_to_drive(str(averaged_model_path), drive_base_dir / averaged_model_path.name)
+        else:
+            print(f"\n--- SKIPPING Step 3: Found existing averaged model at {averaged_model_path} ---")
+
+        # Step 4: Final Training
+        remaining_epochs = opt.total_epochs - opt.pruning_epoch
+        if remaining_epochs <= 0:
+            print(f"\nProcess finished after averaging. No remaining epochs for final training.")
+        elif not opt.resume_run or not (final_train_save_dir / 'weights' / 'best.pt').exists():
+            print(f"\n--- Step 4: Final training for remaining {remaining_epochs} epochs ---")
             callbacks = Callbacks()
             if drive_base_dir:
-                drive_retrain_dir = drive_base_dir / retrain_save_dir.name
-                callbacks = DriveSyncCallback(local_run_dir=retrain_save_dir, drive_run_dir=drive_retrain_dir, save_period=10)
-            
-            retrain_opt = argparse.Namespace(
-                weights=str(pruned_weights_path), cfg=opt.cfg, data=opt.data,
-                hyp='data/hyps/hyp.scratch-low.yaml', epochs=opt.pruning_epoch,
-                batch_size=opt.batch_size, imgsz=opt.img_size,
-                project=opt.project, name=retrain_name, exist_ok=True,
-                device=str(device), cache=opt.cache, workers=opt.workers, 
-                rect=True, resume=False, image_weights=False, # <-- FIX: image_weights added
-                nosave=False, noval=False, noautoanchor=False, noplots=False, evolve=None, bucket='',
-                multi_scale=False, single_cls=False, optimizer='SGD', sync_bn=False, quad=False,
-                cos_lr=False, label_smoothing=0.0, patience=100, freeze=[0], save_period=-1,
-                seed=0, local_rank=-1, entity=None, upload_dataset=False, bbox_interval=-1,
-                artifact_alias="latest"
-            )
-            retrain_opt.save_dir = str(retrain_save_dir)
-            if opt.resume_run and (retrain_save_dir / 'weights' / 'last.pt').exists():
-                retrain_opt.resume = True
-                retrain_opt.weights = ''
-            
-            train(retrain_opt.hyp, retrain_opt, device, callbacks)
-            print(f"Retraining complete. Results saved to {retrain_save_dir}")
-        else:
-            print(f"\n--- SKIPPING Step 4: Found completed retraining results in {retrain_save_dir} ---")
-
-        # Step 5: Average
-        if not opt.resume_run or not averaged_weights_path.exists():
-            print("\n--- Step 5: Averaging pruned and retrained weights ---")
-            best_retrain_weights = retrain_save_dir / 'weights' / 'best.pt'
-            pruned_model_ckpt = torch.load(pruned_weights_path, map_location=device)
-            retrained_model_ckpt = torch.load(str(best_retrain_weights), map_location=device)
-            averaged_model = pruned_model_ckpt['model']
-            pruned_state_dict = averaged_model.state_dict()
-            retrained_state_dict = retrained_model_ckpt['model'].state_dict()
-            for key in pruned_state_dict:
-                if key in retrained_state_dict and pruned_state_dict[key].dtype.is_floating_point:
-                    pruned_state_dict[key].data = (pruned_state_dict[key].data + retrained_state_dict[key].data) / 2.0
-            averaged_model.load_state_dict(pruned_state_dict)
-            torch.save({'model': averaged_model}, averaged_weights_path)
-            print(f"Averaged model weights saved to {averaged_weights_path}")
-            if drive_base_dir:
-                save_to_drive(str(averaged_weights_path), drive_base_dir / averaged_weights_path.name)
-        else:
-            print(f"\n--- SKIPPING Step 5: Found existing averaged model at {averaged_weights_path} ---")
-
-        # Step 6: Final training
-        if not opt.resume_run or not (final_save_dir / 'weights' / 'best.pt').exists():
-            print(f"\n--- Step 6: Final training for {opt.total_epochs} epochs ---")
-            callbacks = Callbacks()
-            if drive_base_dir:
-                drive_final_dir = drive_base_dir / final_save_dir.name
-                callbacks = DriveSyncCallback(local_run_dir=final_save_dir, drive_run_dir=drive_final_dir, save_period=10)
+                drive_final_dir = drive_base_dir / final_train_save_dir.name
+                callbacks = DriveSyncCallback(local_run_dir=final_train_save_dir, drive_run_dir=drive_final_dir, save_period=10)
             
             final_train_opt = argparse.Namespace(
-                weights=str(averaged_weights_path), cfg=opt.cfg, data=opt.data,
-                hyp='data/hyps/hyp.scratch-low.yaml', epochs=opt.total_epochs,
+                weights=str(averaged_model_path), cfg=opt.cfg, data=opt.data,
+                hyp='data/hyps/hyp.scratch-low.yaml', epochs=remaining_epochs,
                 batch_size=opt.batch_size, imgsz=opt.img_size,
                 project=opt.project, name=final_train_name, exist_ok=True,
                 device=str(device), cache=opt.cache, workers=opt.workers,
-                rect=True, resume=False, image_weights=False, # <-- FIX: image_weights added
+                rect=True, resume=False, image_weights=False,
                 nosave=False, noval=False, noautoanchor=False, noplots=False, evolve=None, bucket='',
                 multi_scale=False, single_cls=False, optimizer='SGD', sync_bn=False, quad=False,
                 cos_lr=False, label_smoothing=0.0, patience=100, freeze=[0], save_period=-1,
                 seed=0, local_rank=-1, entity=None, upload_dataset=False, bbox_interval=-1,
                 artifact_alias="latest"
             )
-            final_train_opt.save_dir = str(final_save_dir)
-            if opt.resume_run and (final_save_dir / 'weights' / 'last.pt').exists():
+            final_train_opt.save_dir = str(final_train_save_dir)
+            if opt.resume_run and (final_train_save_dir / 'weights' / 'last.pt').exists():
                 final_train_opt.resume = True
                 final_train_opt.weights = ''
 
             train(final_train_opt.hyp, final_train_opt, device, callbacks)
-            print(f"Final training complete. Results saved to {final_save_dir}")
+            print(f"Final training complete. Results saved to {final_train_save_dir}")
         else:
-             print(f"\n--- SKIPPING Step 6: Found completed final training results in {final_save_dir} ---")
+             print(f"\n--- SKIPPING Step 4: Found completed final training results in {final_train_save_dir} ---")
 
     finally:
         # --- Final cleanup and sync ---
@@ -303,7 +314,7 @@ def main(opt):
         if drive_base_dir:
             print("\n--- Performing final sync to Google Drive ---")
             save_to_drive(str(log_file_path), drive_base_dir / log_file_path.name)
-            for run_dir in [retrain_save_dir, final_save_dir]:
+            for run_dir in [initial_train_save_dir, final_train_save_dir]:
                 final_best_pt = run_dir / 'weights' / 'best.pt'
                 if final_best_pt.exists():
                      save_to_drive(str(final_best_pt), drive_base_dir / run_dir.name / 'weights' / 'best.pt')
@@ -316,7 +327,7 @@ def main(opt):
         print("\nProcess finished successfully. ✨")
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="YOLOv5 Pruning and Training with Dynamic Drive Sync")
+    parser = argparse.ArgumentParser(description="YOLOv5 Multi-Stage Training and Pruning with Dynamic Drive Sync")
     parser.add_argument('--data', type=str, default='data/coco128.yaml', help='dataset.yaml path')
     parser.add_argument('--initial-weights', type=str, default='yolov5n.pt', help='initial weights path')
     parser.add_argument('--cfg', type=str, default='', help='model.yaml path')
@@ -325,12 +336,19 @@ if __name__ == '__main__':
     parser.add_argument('--project', default='runs/custom_train', help='local save directory')
     parser.add_argument('--workers', type=int, default=2, help='max dataloader workers (2 is good for Colab)')
     parser.add_argument('--cache', action='store_true', default=True, help='cache images for faster training')
-    parser.add_argument('--pruning-epoch', type=int, default=10, help='Epochs to retrain after pruning')
-    parser.add_argument('--total-epochs', type=int, default=40, help='Epochs for final training')
-    parser.add_argument('--prune-keep-percent', type=float, default=90.0, help='Percent of weights to KEEP')
-    parser.add_argument('--resume-run', action='store_true', help='Resume from the last saved state')
-    parser.add_argument('--save-to-drive', action='store_true', help='Save all results to Google Drive')
+    
+    # --- MODIFIED ARGUMENT HELP TEXTS ---
+    parser.add_argument('--pruning-epoch', type=int, default=10, help='Epochs for initial training BEFORE pruning is applied.')
+    parser.add_argument('--total-epochs', type=int, default=50, help='Total COMBINED epochs for both initial and final training phases.')
+    
+    parser.add_argument('--prune-keep-percent', type=float, default=90.0, help='Percent of weights to KEEP after pruning.')
+    parser.add_argument('--resume-run', action='store_true', help='Resume from the last successfully completed stage.')
+    parser.add_argument('--save-to-drive', action='store_true', help='Save all results to Google Drive.')
     parser.add_argument('--drive-folder-path', type=str, default='YOLOv5_Runs', help='Base Google Drive folder')
 
     opt = parser.parse_args()
+
+    if opt.total_epochs <= opt.pruning_epoch:
+        raise ValueError("Error: --total-epochs must be greater than --pruning-epoch.")
+        
     main(opt)
