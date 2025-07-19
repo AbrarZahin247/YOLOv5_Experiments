@@ -168,10 +168,13 @@ def main(opt):
                 'patience': 100, 'freeze': [0], 'save_period': -1, 'seed': 0, 'local_rank': -1,
                 'entity': None, 'upload_dataset': False, 'bbox_interval': -1, 'artifact_alias': "latest"
             }
-            # *** FIX: Call train() with the correct 4 arguments ***
+            
+            train_opt_ns = argparse.Namespace(**train_opt_dict)
+            train_opt_ns.save_dir = str(initial_train_save_dir)
+
             train(
-                train_opt_dict['hyp'], 
-                argparse.Namespace(**train_opt_dict), 
+                train_opt_ns.hyp, 
+                train_opt_ns, 
                 device, 
                 callbacks
             )
@@ -185,6 +188,11 @@ def main(opt):
             print("\n--- Step 2: Pruning the initially trained model ---")
             initial_ckpt = torch.load(best_initial_weights_path, map_location=device)
             model = initial_ckpt['model'].float()
+            
+            # *** FIX: Re-enable gradients on all parameters before pruning ***
+            for param in model.parameters():
+                param.requires_grad = True
+
             zero_top_weights(model, percentile=opt.prune_keep_percent)
             save_checkpoint(model, pruned_model_path)
         else:
@@ -228,10 +236,13 @@ def main(opt):
                 'patience': 100, 'freeze': [0], 'save_period': -1, 'seed': 0, 'local_rank': -1,
                 'entity': None, 'upload_dataset': False, 'bbox_interval': -1, 'artifact_alias': "latest"
             }
-            # *** FIX: Call train() with the correct 4 arguments ***
+
+            final_train_opt_ns = argparse.Namespace(**final_train_opt_dict)
+            final_train_opt_ns.save_dir = str(final_train_save_dir)
+
             train(
-                final_train_opt_dict['hyp'], 
-                argparse.Namespace(**final_train_opt_dict), 
+                final_train_opt_ns.hyp, 
+                final_train_opt_ns, 
                 device, 
                 callbacks
             )
