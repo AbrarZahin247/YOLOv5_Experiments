@@ -127,18 +127,22 @@ def main(opt):
     descriptive_name = (f"{date_str}_{model_name}_initial{opt.pruning_epoch}e_pruned{prune_percent_str}pct_"
                         f"final{opt.total_epochs}e")
     
-    os.makedirs(opt.project, exist_ok=True)
-    log_file_path = Path(opt.project) / f"{descriptive_name}.log"
-    pruned_model_path = Path(opt.project) / f'{descriptive_name}_pruned.pt'
-    averaged_model_path = Path(opt.project) / f'{descriptive_name}_averaged.pt'
+    # This is the root directory for all local outputs of this specific run
+    local_project_dir = Path(opt.project) / descriptive_name
+    local_project_dir.mkdir(parents=True, exist_ok=True)
     
-    initial_train_name = f'initial_train_{descriptive_name}'
-    final_train_name = f'final_train_{descriptive_name}'
-    initial_train_save_dir = Path(opt.project) / initial_train_name
-    final_train_save_dir = Path(opt.project) / final_train_name
+    log_file_path = local_project_dir / f"{descriptive_name}.log"
+    pruned_model_path = local_project_dir / f'{descriptive_name}_pruned.pt'
+    averaged_model_path = local_project_dir / f'{descriptive_name}_averaged.pt'
+    
+    initial_train_name = f'initial_train'
+    final_train_name = f'final_train'
+    initial_train_save_dir = local_project_dir / initial_train_name
+    final_train_save_dir = local_project_dir / final_train_name
     
     drive_base_dir = None
     if opt.save_to_drive:
+        # This is the single destination folder on Google Drive for this run
         drive_base_dir = Path('/content/drive/My Drive') / opt.drive_folder_path / descriptive_name
         print(f"Google Drive sync is enabled. Base path: {drive_base_dir}")
 
@@ -159,7 +163,7 @@ def main(opt):
                 'weights': opt.initial_weights, 'cfg': opt.cfg, 'data': opt.data,
                 'hyp': 'data/hyps/hyp.scratch-low.yaml', 'epochs': opt.pruning_epoch,
                 'batch_size': opt.batch_size, 'imgsz': opt.img_size,
-                'project': opt.project, 'name': initial_train_name, 'exist_ok': True,
+                'project': str(local_project_dir), 'name': initial_train_name, 'exist_ok': True,
                 'device': str(device), 'cache': opt.cache, 'workers': opt.workers,
                 'rect': True, 'resume': False, 'image_weights': False, 'nosave': False,
                 'noval': False, 'noautoanchor': False, 'noplots': False, 'evolve': None,
@@ -189,7 +193,6 @@ def main(opt):
             initial_ckpt = torch.load(best_initial_weights_path, map_location=device)
             model = initial_ckpt['model'].float()
             
-            # *** FIX: Re-enable gradients on all parameters before pruning ***
             for param in model.parameters():
                 param.requires_grad = True
 
@@ -227,7 +230,7 @@ def main(opt):
                 'weights': str(averaged_model_path), 'cfg': opt.cfg, 'data': opt.data,
                 'hyp': 'data/hyps/hyp.scratch-low.yaml', 'epochs': remaining_epochs,
                 'batch_size': opt.batch_size, 'imgsz': opt.img_size,
-                'project': opt.project, 'name': final_train_name, 'exist_ok': True,
+                'project': str(local_project_dir), 'name': final_train_name, 'exist_ok': True,
                 'device': str(device), 'cache': opt.cache, 'workers': opt.workers,
                 'rect': True, 'resume': False, 'image_weights': False, 'nosave': False,
                 'noval': False, 'noautoanchor': False, 'noplots': False, 'evolve': None,
@@ -251,11 +254,33 @@ def main(opt):
              print(f"\n--- SKIPPING Step 4 or No remaining epochs ---")
 
     finally:
+        # Restore standard output
         if sys.stdout != original_stdout:
             sys.stdout.logfile.close()
             sys.stdout = original_stdout
         
         print(f"\nTerminal output logging complete. Saved to {log_file_path}")
+        
+        # *** NEW: Perform a complete and final sync of the entire project folder to Drive ***
+        if opt.save_to_drive and drive_base_dir:
+            print("\n--- Starting final sync to Google Drive ---")
+            # Ensure the source directory exists
+            if local_project_dir.is_dir():
+                try:
+                    # If the destination on Drive already exists, remove it for a clean copy
+                    if drive_base_dir.exists():
+                        print(f"Removing existing directory on Drive: {drive_base_dir}")
+                        shutil.rmtree(str(drive_base_dir))
+                    
+                    # Copy the entire local project directory to Google Drive
+                    print(f"Copying all results from '{local_project_dir}' to '{drive_base_dir}'...")
+                    shutil.copytree(str(local_project_dir), str(drive_base_dir))
+                    print("Final sync to Google Drive complete.")
+                except Exception as e:
+                    print(f"ERROR: Failed to complete final sync to Drive: {e}")
+            else:
+                print(f"WARNING: Source project directory '{local_project_dir}' not found for final sync.")
+
         print("\nProcess finished successfully. ✨")
 
 if __name__ == '__main__':
@@ -265,7 +290,7 @@ if __name__ == '__main__':
     parser.add_argument('--cfg', type=str, default='', help='model.yaml path')
     parser.add_argument('--img-size', type=int, default=640, help='image size')
     parser.add_argument('--batch-size', type=int, default=32, help='batch size')
-    parser.add_argument('--project', default='runs/custom_train', help='local save directory')
+    parser.add_argument('--project', default='runs/custom_train', help='Base local directory for all runs')
     parser.add_argument('--workers', type=int, default=2, help='max dataloader workers')
     parser.add_argument('--cache', action='store_true', help='cache images for faster training')
     parser.add_argument('--pruning-epoch', type=int, default=10, help='Epochs for initial training BEFORE pruning.')
@@ -273,7 +298,7 @@ if __name__ == '__main__':
     parser.add_argument('--prune-keep-percent', type=float, default=90.0, help='Percent of weights to KEEP after pruning.')
     parser.add_argument('--resume-run', action='store_true', help='Resume from the last successfully completed stage.')
     parser.add_argument('--save-to-drive', action='store_true', help='Save all results to Google Drive.')
-    parser.add_argument('--drive-folder-path', type=str, default='YOLOv5_Runs', help='Base Google Drive folder')
+    parser.add_argument('--drive-folder-path', type=str, default='YOLOv5_Runs', help='Base Google Drive folder for all runs')
 
     opt = parser.parse_args()
 
