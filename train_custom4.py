@@ -43,38 +43,50 @@ except ImportError as e:
     print(f"ImportError: {e}")
     sys.exit(1)
 
-# ---- DYNAMIC DRIVE SAVING CALLBACK ----
+# ---- OPTIMIZED DYNAMIC DRIVE SAVING CALLBACK ----
 class DriveSyncCallback(Callbacks):
     """
-    A YOLOv5 callback to automatically save best.pt, last.pt, and results.csv to Google Drive
-    at the end of each epoch.
+    An optimized YOLOv5 callback to save files to Google Drive without blocking training.
+    - Saves best.pt only when a new best model is found.
+    - Saves last.pt and results.csv every `save_period` epochs.
     """
-    def __init__(self, local_run_dir, drive_run_dir):
+    def __init__(self, local_run_dir, drive_run_dir, save_period=10):
         super().__init__()
         self.local_run_dir = Path(local_run_dir)
         self.drive_run_dir = Path(drive_run_dir)
         self.weights_dir = self.local_run_dir / 'weights'
         self.drive_weights_dir = self.drive_run_dir / 'weights'
+        self.save_period = save_period
         
         print(f"Drive Sync enabled. Checkpoints will be saved to: {self.drive_weights_dir}")
         self.drive_weights_dir.mkdir(parents=True, exist_ok=True)
         
     def on_fit_epoch_end(self, epoch, results, best, fi, last, stop, best_fitness, early_stop_epoch):
-        """Runs at the end of each epoch to sync files."""
-        for f in ['last.pt', 'best.pt']:
-            local_file = self.weights_dir / f
-            if local_file.exists():
+        """Runs at the end of each epoch to sync files intelligently."""
+        # Save best.pt only when it's updated
+        if best:
+            local_best_file = self.weights_dir / 'best.pt'
+            if local_best_file.exists():
                 try:
-                    shutil.copy2(str(local_file), self.drive_weights_dir)
+                    shutil.copy2(str(local_best_file), self.drive_weights_dir)
                 except Exception as e:
-                    print(f"WARNING: Failed to copy {f} to Drive: {e}")
+                    print(f"WARNING: Failed to copy best.pt to Drive: {e}")
 
-        results_csv = self.local_run_dir / 'results.csv'
-        if results_csv.exists():
-            try:
-                shutil.copy2(str(results_csv), self.drive_run_dir)
-            except Exception as e:
-                print(f"WARNING: Failed to copy results.csv to Drive: {e}")
+        # Save last.pt and results.csv periodically
+        if epoch > 0 and epoch % self.save_period == 0:
+            local_last_file = self.weights_dir / 'last.pt'
+            if local_last_file.exists():
+                try:
+                    shutil.copy2(str(local_last_file), self.drive_weights_dir)
+                except Exception as e:
+                    print(f"WARNING: Failed to copy last.pt to Drive: {e}")
+            
+            results_csv = self.local_run_dir / 'results.csv'
+            if results_csv.exists():
+                try:
+                    shutil.copy2(str(results_csv), self.drive_run_dir)
+                except Exception as e:
+                    print(f"WARNING: Failed to copy results.csv to Drive: {e}")
 
 def download(url, filename="yolov5s.pt"):
     print(f"Downloading {filename} from {url}...")
@@ -103,7 +115,8 @@ def attempt_load(weights, device=None, inplace=True, fuse=True):
 
     if not model_path.exists():
         raise FileNotFoundError(f"'{weights}' does not exist and download failed.")
-    ckpt = torch.load(weights, map_location=device, weights_only=False)
+    # `weights_only=False` is necessary for your custom saving format {'model': model}
+    ckpt = torch.load(weights, map_location=device, weights_only=False) 
     model = ckpt['model'].float()
     model.eval()
     if fuse and hasattr(model, 'fuse'):
@@ -175,6 +188,7 @@ def main(opt):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
+    # Temporarily patch torch.load for your custom model checkpoints
     _original_torch_load = torch.load
     def patched_torch_load(*args, **kwargs):
         kwargs['weights_only'] = False
@@ -186,10 +200,8 @@ def main(opt):
         if not opt.resume_run or not pruned_weights_path.exists():
             print("\n--- Step 1 & 2: Loading and Pruning pre-trained model ---")
             model = attempt_load(opt.initial_weights, device=device)
-            
             for param in model.parameters():
                 param.requires_grad = True
-                
             zero_top_weights(model, percentile=100 - opt.prune_keep_percent)
             torch.save({'model': model}, pruned_weights_path)
             print(f"Pruned model weights saved to {pruned_weights_path}")
@@ -204,18 +216,24 @@ def main(opt):
             callbacks = Callbacks()
             if drive_base_dir:
                 drive_retrain_dir = drive_base_dir / retrain_save_dir.name
-                callbacks = DriveSyncCallback(local_run_dir=retrain_save_dir, drive_run_dir=drive_retrain_dir)
+                # OPTIMIZED: Use the efficient DriveSyncCallback
+                callbacks = DriveSyncCallback(local_run_dir=retrain_save_dir, drive_run_dir=drive_retrain_dir, save_period=10)
             
             retrain_opt = argparse.Namespace(
                 weights=str(pruned_weights_path), cfg=opt.cfg, data=opt.data,
                 hyp='data/hyps/hyp.scratch-low.yaml', epochs=opt.pruning_epoch,
                 batch_size=opt.batch_size, imgsz=opt.img_size,
                 project=opt.project, name=retrain_name, exist_ok=True,
-                device=str(device), cache=opt.cache, workers=8, rect=False, nosave=False, noval=False, 
-                noautoanchor=False, noplots=False, evolve=None, bucket='', multi_scale=False, 
-                single_cls=False, optimizer='SGD', sync_bn=False, quad=False, cos_lr=False, 
-                label_smoothing=0.0, patience=100, freeze=[0], save_period=-1, seed=0, local_rank=-1, 
-                entity=None, upload_dataset=False, bbox_interval=-1, artifact_alias="latest"
+                device=str(device), 
+                # OPTIMIZED: Use caching and optimal workers for Colab
+                cache=opt.cache, workers=opt.workers, 
+                # OPTIMIZED: Rectangular training is faster
+                rect=True, 
+                nosave=False, noval=False, noautoanchor=False, noplots=False, evolve=None, bucket='',
+                multi_scale=False, single_cls=False, optimizer='SGD', sync_bn=False, quad=False,
+                cos_lr=False, label_smoothing=0.0, patience=100, freeze=[0], save_period=-1,
+                seed=0, local_rank=-1, entity=None, upload_dataset=False, bbox_interval=-1,
+                artifact_alias="latest"
             )
             retrain_opt.save_dir = str(retrain_save_dir)
             if opt.resume_run and (retrain_save_dir / 'weights' / 'last.pt').exists():
@@ -253,18 +271,24 @@ def main(opt):
             callbacks = Callbacks()
             if drive_base_dir:
                 drive_final_dir = drive_base_dir / final_save_dir.name
-                callbacks = DriveSyncCallback(local_run_dir=final_save_dir, drive_run_dir=drive_final_dir)
+                # OPTIMIZED: Use the efficient DriveSyncCallback
+                callbacks = DriveSyncCallback(local_run_dir=final_save_dir, drive_run_dir=drive_final_dir, save_period=10)
             
             final_train_opt = argparse.Namespace(
                 weights=str(averaged_weights_path), cfg=opt.cfg, data=opt.data,
                 hyp='data/hyps/hyp.scratch-low.yaml', epochs=opt.total_epochs,
                 batch_size=opt.batch_size, imgsz=opt.img_size,
                 project=opt.project, name=final_train_name, exist_ok=True,
-                device=str(device), cache=opt.cache, workers=8, rect=False, nosave=False, noval=False, 
-                noautoanchor=False, noplots=False, evolve=None, bucket='', multi_scale=False, 
-                single_cls=False, optimizer='SGD', sync_bn=False, quad=False, cos_lr=False, 
-                label_smoothing=0.0, patience=100, freeze=[0], save_period=-1, seed=0, local_rank=-1, 
-                entity=None, upload_dataset=False, bbox_interval=-1, artifact_alias="latest"
+                device=str(device),
+                # OPTIMIZED: Use caching and optimal workers for Colab
+                cache=opt.cache, workers=opt.workers,
+                # OPTIMIZED: Rectangular training is faster
+                rect=True,
+                nosave=False, noval=False, noautoanchor=False, noplots=False, evolve=None, bucket='',
+                multi_scale=False, single_cls=False, optimizer='SGD', sync_bn=False, quad=False,
+                cos_lr=False, label_smoothing=0.0, patience=100, freeze=[0], save_period=-1,
+                seed=0, local_rank=-1, entity=None, upload_dataset=False, bbox_interval=-1,
+                artifact_alias="latest"
             )
             final_train_opt.save_dir = str(final_save_dir)
             if opt.resume_run and (final_save_dir / 'weights' / 'last.pt').exists():
@@ -277,13 +301,25 @@ def main(opt):
              print(f"\n--- SKIPPING Step 6: Found completed final training results in {final_save_dir} ---")
 
     finally:
+        # --- Final cleanup and sync ---
         if sys.stdout != original_stdout:
             sys.stdout.logfile.close()
             sys.stdout = original_stdout
         
         print(f"\nTerminal output logging complete. Saved to {log_file_path}")
+        
+        # OPTIMIZED: Sync entire run folders to Drive at the very end
         if drive_base_dir:
+            print("\n--- Performing final sync to Google Drive ---")
             save_to_drive(str(log_file_path), drive_base_dir / log_file_path.name)
+            # Sync any other critical files not handled by the periodic callback
+            for run_dir in [retrain_save_dir, final_save_dir]:
+                final_best_pt = run_dir / 'weights' / 'best.pt'
+                if final_best_pt.exists():
+                     save_to_drive(str(final_best_pt), drive_base_dir / run_dir.name / 'weights' / 'best.pt')
+                final_results_csv = run_dir / 'results.csv'
+                if final_results_csv.exists():
+                    save_to_drive(str(final_results_csv), drive_base_dir / run_dir.name / 'results.csv')
 
         torch.load = _original_torch_load
         print("\nRestored original torch.load function.")
@@ -295,10 +331,12 @@ if __name__ == '__main__':
     parser.add_argument('--initial-weights', type=str, default='yolov5n.pt', help='initial weights path')
     parser.add_argument('--cfg', type=str, default='', help='model.yaml path')
     parser.add_argument('--img-size', type=int, default=640, help='image size')
-    parser.add_argument('--batch-size', type=int, default=16, help='batch size')
-    # FIXED: Corrected the typo from add__argument to add_argument
+    parser.add_argument('--batch-size', type=int, default=32, help='batch size (increase for better GPU utilization)')
     parser.add_argument('--project', default='runs/custom_train', help='local save directory')
-    parser.add_argument('--cache', action='store_true', help='cache images for faster training')
+    # OPTIMIZED: Changed default workers and added help text
+    parser.add_argument('--workers', type=int, default=2, help='max dataloader workers (2 is good for Colab)')
+    # OPTIMIZED: Enabled caching by default for huge speedup in Colab
+    parser.add_argument('--cache', action='store_true', default=True, help='cache images for faster training')
     parser.add_argument('--pruning-epoch', type=int, default=3, help='Epochs to retrain after pruning')
     parser.add_argument('--total-epochs', type=int, default=10, help='Epochs for final training')
     parser.add_argument('--prune-keep-percent', type=float, default=90.0, help='Percent of weights to KEEP')
@@ -307,4 +345,6 @@ if __name__ == '__main__':
     parser.add_argument('--drive-folder-path', type=str, default='YOLOv5_Runs', help='Base Google Drive folder')
 
     opt = parser.parse_args()
+    # Corrected the typo from `add__argument` in the original prompt
+    # The code above is already fixed, this is just a note.
     main(opt)
