@@ -155,8 +155,7 @@ def main(opt):
             print(f"\n--- Step 1: Initial training for {opt.pruning_epoch} epochs ---")
             callbacks = DriveSyncCallback(initial_train_save_dir, drive_base_dir / initial_train_name) if drive_base_dir else Callbacks()
             
-            # Use a standard training call for the initial phase
-            train_opt = {
+            train_opt_dict = {
                 'weights': opt.initial_weights, 'cfg': opt.cfg, 'data': opt.data,
                 'hyp': 'data/hyps/hyp.scratch-low.yaml', 'epochs': opt.pruning_epoch,
                 'batch_size': opt.batch_size, 'imgsz': opt.img_size,
@@ -169,7 +168,13 @@ def main(opt):
                 'patience': 100, 'freeze': [0], 'save_period': -1, 'seed': 0, 'local_rank': -1,
                 'entity': None, 'upload_dataset': False, 'bbox_interval': -1, 'artifact_alias': "latest"
             }
-            train(argparse.Namespace(**train_opt))
+            # *** FIX: Call train() with the correct 4 arguments ***
+            train(
+                train_opt_dict['hyp'], 
+                argparse.Namespace(**train_opt_dict), 
+                device, 
+                callbacks
+            )
             print(f"Initial training complete. Results saved to {initial_train_save_dir}")
         else:
             print(f"\n--- SKIPPING Step 1: Found completed initial training results in {initial_train_save_dir} ---")
@@ -180,8 +185,8 @@ def main(opt):
             print("\n--- Step 2: Pruning the initially trained model ---")
             initial_ckpt = torch.load(best_initial_weights_path, map_location=device)
             model = initial_ckpt['model'].float()
-            zero_top_weights(model, percentile=opt.prune_keep_percent) # Corrected pruning logic
-            save_checkpoint(model, pruned_model_path) # Save in compatible format
+            zero_top_weights(model, percentile=opt.prune_keep_percent)
+            save_checkpoint(model, pruned_model_path)
         else:
             print(f"\n--- SKIPPING Step 2: Found existing pruned model at {pruned_model_path} ---")
 
@@ -191,7 +196,7 @@ def main(opt):
             initial_ckpt = torch.load(best_initial_weights_path, map_location=device)
             pruned_ckpt = torch.load(pruned_model_path, map_location=device)
             
-            avg_model = initial_ckpt['model'].float() # Start with a clean model structure
+            avg_model = initial_ckpt['model'].float()
             initial_state_dict = avg_model.state_dict()
             pruned_state_dict = pruned_ckpt['model'].state_dict()
 
@@ -200,7 +205,7 @@ def main(opt):
                     initial_state_dict[key].data = (initial_state_dict[key].data + pruned_state_dict[key].data) / 2.0
             
             avg_model.load_state_dict(initial_state_dict)
-            save_checkpoint(avg_model, averaged_model_path) # Save in compatible format
+            save_checkpoint(avg_model, averaged_model_path)
         else:
             print(f"\n--- SKIPPING Step 3: Found existing averaged model at {averaged_model_path} ---")
 
@@ -210,7 +215,7 @@ def main(opt):
             print(f"\n--- Step 4: Final training for remaining {remaining_epochs} epochs ---")
             callbacks = DriveSyncCallback(final_train_save_dir, drive_base_dir / final_train_name) if drive_base_dir else Callbacks()
             
-            final_train_opt = {
+            final_train_opt_dict = {
                 'weights': str(averaged_model_path), 'cfg': opt.cfg, 'data': opt.data,
                 'hyp': 'data/hyps/hyp.scratch-low.yaml', 'epochs': remaining_epochs,
                 'batch_size': opt.batch_size, 'imgsz': opt.img_size,
@@ -223,7 +228,13 @@ def main(opt):
                 'patience': 100, 'freeze': [0], 'save_period': -1, 'seed': 0, 'local_rank': -1,
                 'entity': None, 'upload_dataset': False, 'bbox_interval': -1, 'artifact_alias': "latest"
             }
-            train(argparse.Namespace(**final_train_opt))
+            # *** FIX: Call train() with the correct 4 arguments ***
+            train(
+                final_train_opt_dict['hyp'], 
+                argparse.Namespace(**final_train_opt_dict), 
+                device, 
+                callbacks
+            )
             print(f"Final training complete. Results saved to {final_train_save_dir}")
         else:
              print(f"\n--- SKIPPING Step 4 or No remaining epochs ---")
