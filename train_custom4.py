@@ -216,7 +216,6 @@ def main(opt):
             callbacks = Callbacks()
             if drive_base_dir:
                 drive_retrain_dir = drive_base_dir / retrain_save_dir.name
-                # OPTIMIZED: Use the efficient DriveSyncCallback
                 callbacks = DriveSyncCallback(local_run_dir=retrain_save_dir, drive_run_dir=drive_retrain_dir, save_period=10)
             
             retrain_opt = argparse.Namespace(
@@ -224,11 +223,8 @@ def main(opt):
                 hyp='data/hyps/hyp.scratch-low.yaml', epochs=opt.pruning_epoch,
                 batch_size=opt.batch_size, imgsz=opt.img_size,
                 project=opt.project, name=retrain_name, exist_ok=True,
-                device=str(device), 
-                # OPTIMIZED: Use caching and optimal workers for Colab
-                cache=opt.cache, workers=opt.workers, 
-                # OPTIMIZED: Rectangular training is faster
-                rect=True, 
+                device=str(device), cache=opt.cache, workers=opt.workers, 
+                rect=True, resume=False, # <-- Resume attribute initialized here
                 nosave=False, noval=False, noautoanchor=False, noplots=False, evolve=None, bucket='',
                 multi_scale=False, single_cls=False, optimizer='SGD', sync_bn=False, quad=False,
                 cos_lr=False, label_smoothing=0.0, patience=100, freeze=[0], save_period=-1,
@@ -271,7 +267,6 @@ def main(opt):
             callbacks = Callbacks()
             if drive_base_dir:
                 drive_final_dir = drive_base_dir / final_save_dir.name
-                # OPTIMIZED: Use the efficient DriveSyncCallback
                 callbacks = DriveSyncCallback(local_run_dir=final_save_dir, drive_run_dir=drive_final_dir, save_period=10)
             
             final_train_opt = argparse.Namespace(
@@ -279,11 +274,8 @@ def main(opt):
                 hyp='data/hyps/hyp.scratch-low.yaml', epochs=opt.total_epochs,
                 batch_size=opt.batch_size, imgsz=opt.img_size,
                 project=opt.project, name=final_train_name, exist_ok=True,
-                device=str(device),
-                # OPTIMIZED: Use caching and optimal workers for Colab
-                cache=opt.cache, workers=opt.workers,
-                # OPTIMIZED: Rectangular training is faster
-                rect=True,
+                device=str(device), cache=opt.cache, workers=opt.workers,
+                rect=True, resume=False, # <-- Resume attribute initialized here
                 nosave=False, noval=False, noautoanchor=False, noplots=False, evolve=None, bucket='',
                 multi_scale=False, single_cls=False, optimizer='SGD', sync_bn=False, quad=False,
                 cos_lr=False, label_smoothing=0.0, patience=100, freeze=[0], save_period=-1,
@@ -308,11 +300,9 @@ def main(opt):
         
         print(f"\nTerminal output logging complete. Saved to {log_file_path}")
         
-        # OPTIMIZED: Sync entire run folders to Drive at the very end
         if drive_base_dir:
             print("\n--- Performing final sync to Google Drive ---")
             save_to_drive(str(log_file_path), drive_base_dir / log_file_path.name)
-            # Sync any other critical files not handled by the periodic callback
             for run_dir in [retrain_save_dir, final_save_dir]:
                 final_best_pt = run_dir / 'weights' / 'best.pt'
                 if final_best_pt.exists():
@@ -333,9 +323,7 @@ if __name__ == '__main__':
     parser.add_argument('--img-size', type=int, default=640, help='image size')
     parser.add_argument('--batch-size', type=int, default=32, help='batch size (increase for better GPU utilization)')
     parser.add_argument('--project', default='runs/custom_train', help='local save directory')
-    # OPTIMIZED: Changed default workers and added help text
     parser.add_argument('--workers', type=int, default=2, help='max dataloader workers (2 is good for Colab)')
-    # OPTIMIZED: Enabled caching by default for huge speedup in Colab
     parser.add_argument('--cache', action='store_true', default=True, help='cache images for faster training')
     parser.add_argument('--pruning-epoch', type=int, default=3, help='Epochs to retrain after pruning')
     parser.add_argument('--total-epochs', type=int, default=10, help='Epochs for final training')
@@ -345,6 +333,4 @@ if __name__ == '__main__':
     parser.add_argument('--drive-folder-path', type=str, default='YOLOv5_Runs', help='Base Google Drive folder')
 
     opt = parser.parse_args()
-    # Corrected the typo from `add__argument` in the original prompt
-    # The code above is already fixed, this is just a note.
     main(opt)
