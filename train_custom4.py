@@ -47,41 +47,43 @@ except ImportError as e:
     print(f"ImportError: {e}")
     sys.exit(1)
 
-# ---- OPTIMIZED DYNAMIC DRIVE SAVING CALLBACK ----
+# ---- UPDATED: Per-Epoch Drive Sync Callback ----
 class DriveSyncCallback(Callbacks):
     """
-    An optimized YOLOv5 callback to save files to Google Drive without blocking training.
+    A YOLOv5 callback to sync the entire run directory to a destination (e.g., Google Drive)
+    after every single training epoch. This replaces the destination directory on each sync.
+
+    NOTE: This performs a full directory copy on each epoch, which can be I/O intensive
+    and may slow down training, especially in environments like Google Colab.
     """
-    def __init__(self, local_run_dir, drive_run_dir, save_period=10):
+    def __init__(self, local_run_dir, drive_run_dir):
         super().__init__()
         self.local_run_dir = Path(local_run_dir)
         self.drive_run_dir = Path(drive_run_dir)
-        self.weights_dir = self.local_run_dir / 'weights'
-        self.drive_weights_dir = self.drive_run_dir / 'weights'
-        self.save_period = save_period
         
-        print(f"Drive Sync enabled. Checkpoints will be saved to: {self.drive_weights_dir}")
-        self.drive_weights_dir.mkdir(parents=True, exist_ok=True)
-        
-    def on_fit_epoch_end(self, epoch, results, best, fi, last, stop, best_fitness, early_stop_epoch):
-        """Runs at the end of each epoch to sync files intelligently."""
-        if best:
-            local_best_file = self.weights_dir / 'best.pt'
-            if local_best_file.exists():
-                try:
-                    shutil.copy2(str(local_best_file), self.drive_weights_dir)
-                except Exception as e:
-                    print(f"WARNING: Failed to copy best.pt to Drive: {e}")
+        # We only need to ensure the parent of the destination directory exists.
+        self.drive_run_dir.parent.mkdir(parents=True, exist_ok=True)
+        print(f"Drive Sync enabled. After each epoch, '{self.local_run_dir}' will be fully synced to '{self.drive_run_dir}'.")
 
-        if epoch > 0 and epoch % self.save_period == 0:
-            for filename in ['last.pt', 'results.csv']:
-                local_file = self.local_run_dir / filename if filename.endswith('csv') else self.weights_dir / filename
-                drive_dest = self.drive_run_dir if filename.endswith('csv') else self.drive_weights_dir
-                if local_file.exists():
-                    try:
-                        shutil.copy2(str(local_file), drive_dest)
-                    except Exception as e:
-                        print(f"WARNING: Failed to copy {filename} to Drive: {e}")
+    def on_fit_epoch_end(self, epoch, results, best, fi, last, stop, best_fitness, early_stop_epoch):
+        """Runs at the end of each epoch to sync the entire run folder."""
+        # The training run directory is created by YOLOv5 on the first batch, not before.
+        # So we must check if it exists before trying to copy it.
+        if not self.local_run_dir.is_dir():
+            print(f"INFO: Source directory '{self.local_run_dir}' not yet created. Skipping sync for epoch {epoch}.")
+            return
+
+        print(f"\n--- Epoch {epoch} complete. Syncing all files and subfolders to {self.drive_run_dir} ---")
+        try:
+            # For a clean sync, first remove the old destination directory if it exists.
+            if self.drive_run_dir.exists():
+                shutil.rmtree(str(self.drive_run_dir))
+            
+            # Copy the entire local run directory to the destination.
+            shutil.copytree(str(self.local_run_dir), str(self.drive_run_dir))
+            print(f"Successfully synced '{self.local_run_dir}' to '{self.drive_run_dir}'.")
+        except Exception as e:
+            print(f"WARNING: An error occurred during the sync to Drive: {e}")
 
 def get_model_weights_as_vector(model):
     """Extracts model weights into a single flat vector."""
@@ -157,6 +159,7 @@ def main(opt):
         # Step 1: Initial Training
         if not opt.resume_run or not (initial_train_save_dir / 'weights' / 'best.pt').exists():
             print(f"\n--- Step 1: Initial training for {opt.pruning_epoch} epochs ---")
+            # UPDATED: Call to the new callback, no save_period needed
             callbacks = DriveSyncCallback(initial_train_save_dir, drive_base_dir / initial_train_name) if drive_base_dir else Callbacks()
             
             train_opt_dict = {
@@ -224,6 +227,7 @@ def main(opt):
         remaining_epochs = opt.total_epochs - opt.pruning_epoch
         if remaining_epochs > 0 and (not opt.resume_run or not (final_train_save_dir / 'weights' / 'best.pt').exists()):
             print(f"\n--- Step 4: Final training for remaining {remaining_epochs} epochs ---")
+            # UPDATED: Call to the new callback, no save_period needed
             callbacks = DriveSyncCallback(final_train_save_dir, drive_base_dir / final_train_name) if drive_base_dir else Callbacks()
             
             final_train_opt_dict = {
@@ -261,10 +265,10 @@ def main(opt):
         
         print(f"\nTerminal output logging complete. Saved to {log_file_path}")
         
-        # *** NEW: Perform a complete and final sync of the entire project folder to Drive ***
+        # This final sync ensures the entire project folder, including logs and intermediate
+        # models, is cleanly copied to Drive at the very end of the process.
         if opt.save_to_drive and drive_base_dir:
-            print("\n--- Starting final sync to Google Drive ---")
-            # Ensure the source directory exists
+            print("\n--- Starting final sync of entire project to Google Drive ---")
             if local_project_dir.is_dir():
                 try:
                     # If the destination on Drive already exists, remove it for a clean copy
