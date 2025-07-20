@@ -155,13 +155,16 @@ def main(opt):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
+    # --- SETUP CALLBACKS ---
+    # Create one callback instance to use for all training stages.
+    callbacks = Callbacks()  # Default non-syncing callbacks
+    if opt.save_to_drive and drive_base_dir:
+        callbacks = DriveSyncCallback(local_project_dir, drive_base_dir)
+
     try:
         # Step 1: Initial Training
         if not opt.resume_run or not (initial_train_save_dir / 'weights' / 'best.pt').exists():
             print(f"\n--- Step 1: Initial training for {opt.pruning_epoch} epochs ---")
-            # UPDATED: Call to the new callback, no save_period needed
-            callbacks = DriveSyncCallback(initial_train_save_dir, drive_base_dir / initial_train_name) if drive_base_dir else Callbacks()
-            
             train_opt_dict = {
                 'weights': opt.initial_weights, 'cfg': opt.cfg, 'data': opt.data,
                 'hyp': 'data/hyps/hyp.scratch-low.yaml', 'epochs': opt.pruning_epoch,
@@ -175,16 +178,10 @@ def main(opt):
                 'patience': 100, 'freeze': [0], 'save_period': -1, 'seed': 0, 'local_rank': -1,
                 'entity': None, 'upload_dataset': False, 'bbox_interval': -1, 'artifact_alias': "latest"
             }
-            
             train_opt_ns = argparse.Namespace(**train_opt_dict)
             train_opt_ns.save_dir = str(initial_train_save_dir)
 
-            train(
-                train_opt_ns.hyp, 
-                train_opt_ns, 
-                device, 
-                callbacks
-            )
+            train(train_opt_ns.hyp, train_opt_ns, device, callbacks)
             print(f"Initial training complete. Results saved to {initial_train_save_dir}")
         else:
             print(f"\n--- SKIPPING Step 1: Found completed initial training results in {initial_train_save_dir} ---")
@@ -193,12 +190,10 @@ def main(opt):
         best_initial_weights_path = initial_train_save_dir / 'weights' / 'best.pt'
         if not opt.resume_run or not pruned_model_path.exists():
             print("\n--- Step 2: Pruning the initially trained model ---")
-            initial_ckpt = torch.load(best_initial_weights_path, map_location=device)
+            initial_ckpt = torch.load(best_initial_weights_path, map_location=device, weights_only=False) # <-- FIX
             model = initial_ckpt['model'].float()
-            
             for param in model.parameters():
                 param.requires_grad = True
-
             zero_top_weights(model, percentile=opt.prune_keep_percent)
             save_checkpoint(model, pruned_model_path)
         else:
@@ -207,17 +202,14 @@ def main(opt):
         # Step 3: Average the pre-pruned and post-pruned models
         if not opt.resume_run or not averaged_model_path.exists():
             print("\n--- Step 3: Averaging pre-pruned and post-pruned weights ---")
-            initial_ckpt = torch.load(best_initial_weights_path, map_location=device)
-            pruned_ckpt = torch.load(pruned_model_path, map_location=device)
-            
+            initial_ckpt = torch.load(best_initial_weights_path, map_location=device, weights_only=False) # <-- FIX
+            pruned_ckpt = torch.load(pruned_model_path, map_location=device, weights_only=False) # <-- FIX
             avg_model = initial_ckpt['model'].float()
             initial_state_dict = avg_model.state_dict()
             pruned_state_dict = pruned_ckpt['model'].state_dict()
-
             for key in initial_state_dict:
                 if key in pruned_state_dict and initial_state_dict[key].dtype.is_floating_point:
                     initial_state_dict[key].data = (initial_state_dict[key].data + pruned_state_dict[key].data) / 2.0
-            
             avg_model.load_state_dict(initial_state_dict)
             save_checkpoint(avg_model, averaged_model_path)
         else:
@@ -227,9 +219,6 @@ def main(opt):
         remaining_epochs = opt.total_epochs - opt.pruning_epoch
         if remaining_epochs > 0 and (not opt.resume_run or not (final_train_save_dir / 'weights' / 'best.pt').exists()):
             print(f"\n--- Step 4: Final training for remaining {remaining_epochs} epochs ---")
-            # UPDATED: Call to the new callback, no save_period needed
-            callbacks = DriveSyncCallback(final_train_save_dir, drive_base_dir / final_train_name) if drive_base_dir else Callbacks()
-            
             final_train_opt_dict = {
                 'weights': str(averaged_model_path), 'cfg': opt.cfg, 'data': opt.data,
                 'hyp': 'data/hyps/hyp.scratch-low.yaml', 'epochs': remaining_epochs,
@@ -243,16 +232,10 @@ def main(opt):
                 'patience': 100, 'freeze': [0], 'save_period': -1, 'seed': 0, 'local_rank': -1,
                 'entity': None, 'upload_dataset': False, 'bbox_interval': -1, 'artifact_alias': "latest"
             }
-
             final_train_opt_ns = argparse.Namespace(**final_train_opt_dict)
             final_train_opt_ns.save_dir = str(final_train_save_dir)
 
-            train(
-                final_train_opt_ns.hyp, 
-                final_train_opt_ns, 
-                device, 
-                callbacks
-            )
+            train(final_train_opt_ns.hyp, final_train_opt_ns, device, callbacks)
             print(f"Final training complete. Results saved to {final_train_save_dir}")
         else:
              print(f"\n--- SKIPPING Step 4 or No remaining epochs ---")
@@ -264,27 +247,6 @@ def main(opt):
             sys.stdout = original_stdout
         
         print(f"\nTerminal output logging complete. Saved to {log_file_path}")
-        
-        # This final sync ensures the entire project folder, including logs and intermediate
-        # models, is cleanly copied to Drive at the very end of the process.
-        if opt.save_to_drive and drive_base_dir:
-            print("\n--- Starting final sync of entire project to Google Drive ---")
-            if local_project_dir.is_dir():
-                try:
-                    # If the destination on Drive already exists, remove it for a clean copy
-                    if drive_base_dir.exists():
-                        print(f"Removing existing directory on Drive: {drive_base_dir}")
-                        shutil.rmtree(str(drive_base_dir))
-                    
-                    # Copy the entire local project directory to Google Drive
-                    print(f"Copying all results from '{local_project_dir}' to '{drive_base_dir}'...")
-                    shutil.copytree(str(local_project_dir), str(drive_base_dir))
-                    print("Final sync to Google Drive complete.")
-                except Exception as e:
-                    print(f"ERROR: Failed to complete final sync to Drive: {e}")
-            else:
-                print(f"WARNING: Source project directory '{local_project_dir}' not found for final sync.")
-
         print("\nProcess finished successfully. ✨")
 
 if __name__ == '__main__':
